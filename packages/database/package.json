@@ -1,0 +1,20 @@
+{
+  "name": "@vod-search/database",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@vod-search/contracts": "workspace:*",
+    "better-sqlite3": "12.11.1",
+    "sqlite-vec": "0.1.9"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.13",
+    "@vod-search/search": "workspace:*"
+  }
+}

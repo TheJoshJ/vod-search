@@ -1,0 +1,23 @@
+{
+  "name": "vod-search",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.15.1",
+  "scripts": {
+    "dev": "corepack pnpm --filter @vod-search/desktop dev",
+    "build": "corepack pnpm -r build",
+    "typecheck": "corepack pnpm -r typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepare:runtimes:win": "tsx scripts/fetch-windows-runtimes.ts",
+    "package:win": "corepack pnpm prepare:runtimes:win && corepack pnpm --filter @vod-search/desktop package:win"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "extract-zip": "2.0.1",
+    "tsx": "4.23.1",
+    "typescript": "7.0.2",
+    "vitest": "4.1.0"
+  }
+}

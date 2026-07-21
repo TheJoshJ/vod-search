@@ -1,0 +1,17 @@
+node_modules/
+.pnpm-store/
+dist/
+out/
+release/
+.cache/
+resources/runtime/windows/
+coverage/
+playwright-report/
+test-results/
+*.log
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example

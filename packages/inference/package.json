@@ -1,0 +1,17 @@
+{
+  "name": "@vod-search/inference",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.2.0",
+    "@opencode-ai/sdk": "1.18.4",
+    "@vod-search/contracts": "workspace:*",
+    "zod": "4.4.3"
+  }
+}
