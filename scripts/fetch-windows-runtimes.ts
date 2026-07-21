@@ -33,18 +33,6 @@ const archives: RuntimeArchive[] = [
     url: "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-bin-x64.zip",
     sizeBytes: 7_982_101,
     sha256: "7d8be46ecd31828e1eb7a2ecdd0d6b314feafd82163038ab6092594b0a063539"
-  },
-  {
-    id: "llama-vulkan",
-    url: "https://github.com/ggml-org/llama.cpp/releases/download/b10075/llama-b10075-bin-win-vulkan-x64.zip",
-    sizeBytes: 33_280_315,
-    sha256: "763a46cf514443d597e7dc04330012d4e401e40cdb4d61af1fb6145909ad41ae"
-  },
-  {
-    id: "llama-cpu",
-    url: "https://github.com/ggml-org/llama.cpp/releases/download/b10075/llama-b10075-bin-win-cpu-x64.zip",
-    sizeBytes: 18_013_666,
-    sha256: "67ccd320365193e5fa5e2778773a30ee3fc19802b2a9f324023641d160a1e802"
   }
 ]
 

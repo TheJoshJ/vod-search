@@ -10,7 +10,6 @@
   },
   "dependencies": {
     "@huggingface/transformers": "4.2.0",
-    "@opencode-ai/sdk": "1.18.4",
     "@vod-search/contracts": "workspace:*",
     "zod": "4.4.3"
   }

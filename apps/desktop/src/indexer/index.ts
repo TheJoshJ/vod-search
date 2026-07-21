@@ -1,7 +1,6 @@
 import { availableParallelism } from "node:os"
 import { dirname, extname, join, resolve } from "node:path"
-import { createRequire } from "node:module"
-import { access, mkdir, writeFile } from "node:fs/promises"
+import { access, mkdir } from "node:fs/promises"
 import { openDatabase, Repository } from "@vod-search/database"
 import {
   addFolderRequestSchema,
@@ -12,11 +11,12 @@ import {
 import { chunkTranscript, parseSubtitle, SearchService } from "@vod-search/search"
 import {
   BgeEmbedder,
+  CODEX_ENRICHMENT_VERSION,
+  CodexEnricher,
   extractEmbeddedSubtitle,
-  findFreePort,
-  LlamaServer,
+  MAX_CODEX_ENRICHMENT_CHARACTERS,
+  MAX_CODEX_ENRICHMENT_CHUNKS,
   ModelManager,
-  OpenCodeEnricher,
   probeMedia,
   transcribeWithWhisper
 } from "@vod-search/inference"
@@ -40,12 +40,10 @@ const modelsPathFromEnvironment = process.env.VOD_SEARCH_MODELS_PATH
 if (!modelsPathFromEnvironment) throw new Error("VOD_SEARCH_MODELS_PATH is required")
 const modelsPath: string = modelsPathFromEnvironment
 const models = new ModelManager(modelsPath, undefined, notifyModelsChanged)
-const localRequire = createRequire(import.meta.url)
 repository.recoverRunningJobs()
 let embedder: BgeEmbedder | null = null
 let embedderStarting: Promise<BgeEmbedder | null> | null = null
-let enricher: OpenCodeEnricher | null = null
-let llamaServer: LlamaServer | null = null
+let enricher: CodexEnricher | null = null
 let nextEnricherAttemptAt = 0
 let schedulerRunning = false
 
@@ -108,6 +106,17 @@ async function dispatch(method: string, payload: unknown): Promise<unknown> {
     case "models:list": return models.list()
     case "models:download": await models.install(String(payload)); return undefined
     case "models:cancel-download": models.cancel(String(payload)); return undefined
+    case "codex:refresh": {
+      enricher = null
+      nextEnricherAttemptAt = 0
+      for (const job of repository.listJobs()) {
+        if (job.mediaId && job.stage === "enrich" && job.status === "failed") {
+          repository.requeueJob(job.mediaId, "enrich")
+        }
+      }
+      notifyJobsChanged()
+      return undefined
+    }
     case "media:path": return repository.getMediaPath(String(payload))
     case "media:detail": {
       const mediaId = String(payload)
@@ -144,8 +153,6 @@ function createThrottledNotification(callback: () => void, intervalMs: number): 
 }
 
 process.on("exit", () => {
-  enricher?.close()
-  llamaServer?.close()
   database.close()
   for (const timer of rescanTimers.values()) clearTimeout(timer)
   for (const watcher of folderWatchers.values()) void watcher.close()
@@ -163,14 +170,12 @@ async function runSchedulerTick(): Promise<void> {
     const transcriptionRuntime = await getTranscriptionRuntime(installations, ffmpegPath)
     const hasEmbeddingModel = installations.some((model) =>
       model.modelId === "bge-small-en-v1.5" && model.status === "installed")
-    const hasEnrichmentModel = installations.some((model) =>
-      model.modelId === "qwen3-4b-q4-k-m" && model.status === "installed")
-    const hasEnrichmentRuntime = (await findLlamaRuntimeCandidates()).length > 0
+    const activeEnricher = await getEnricher()
     const availableStages = [
       ...(ffprobePath ? ["probe" as const] : []),
       ...(transcriptionRuntime ? ["transcribe" as const] : []),
       ...(hasEmbeddingModel ? ["embed" as const] : []),
-      ...(hasEnrichmentModel && hasEnrichmentRuntime ? ["enrich" as const] : [])
+      ...(activeEnricher ? ["enrich" as const] : [])
     ]
     if (availableStages.length === 0) return
     const job = repository.claimNextJob(availableStages)
@@ -186,8 +191,7 @@ async function runSchedulerTick(): Promise<void> {
         if (!activeEmbedder) throw new Error("The embedding model is not installed")
         await runEmbeddingJob(job.id, job.mediaId, activeEmbedder)
       } else if (job.stage === "enrich") {
-        const activeEnricher = await getEnricher()
-        if (!activeEnricher) throw new Error("The local enrichment runtime could not be started")
+        if (!activeEnricher) throw new Error("Codex CLI is not installed and signed in")
         await runEnrichmentJob(job.id, job.mediaId, activeEnricher)
       }
     } catch (error) {
@@ -236,51 +240,25 @@ async function getEmbedder(): Promise<BgeEmbedder | null> {
   return embedderStarting
 }
 
-async function getEnricher(): Promise<OpenCodeEnricher | null> {
+async function getEnricher(): Promise<CodexEnricher | null> {
   if (enricher) return enricher
   if (Date.now() < nextEnricherAttemptAt) return null
-  const installation = (await models.list()).find((model) => model.modelId === "qwen3-4b-q4-k-m")
-  if (installation?.status !== "installed" || !installation.path) return null
-  const runtimeCandidates = await findLlamaRuntimeCandidates()
-  if (runtimeCandidates.length === 0) return null
-  const openCodeExecutable = await findOpenCodeExecutable()
-  if (!openCodeExecutable) return null
-
   try {
-    const workspacePath = join(dirname(modelsPath), "opencode-workspace")
-    await prepareOpenCodeWorkspace(workspacePath)
-    const modelPath = models.getInstalledFile("qwen3-4b-q4-k-m", "Qwen3-4B-Q4_K_M.gguf")
-    if (!modelPath) return null
-    let server: LlamaServer | null = null
-    let baseUrl: string | null = null
-    let lastRuntimeError: unknown = null
-    for (const runtime of runtimeCandidates) {
-      const candidate = new LlamaServer()
-      try {
-        baseUrl = await candidate.start({ executablePath: runtime.path, modelPath, useGpu: runtime.useGpu })
-        server = candidate
-        break
-      } catch (error) {
-        candidate.close()
-        lastRuntimeError = error
-      }
-    }
-    if (!server || !baseUrl) throw lastRuntimeError ?? new Error("No compatible llama-server runtime was found")
-    const instance = new OpenCodeEnricher()
+    const instance = new CodexEnricher()
     await instance.start({
-      workspacePath,
-      llamaBaseUrl: baseUrl,
-      port: await findFreePort(),
-      executablePath: openCodeExecutable
+      workspacePath: join(dirname(modelsPath), "codex-workspace"),
+      executablePath: await findCodexExecutable()
     })
-    llamaServer = server
+    const status = await instance.probe()
+    if (!status.installed || !status.authenticated) {
+      nextEnricherAttemptAt = Date.now() + 30_000
+      return null
+    }
     enricher = instance
     return instance
   } catch (error) {
-    llamaServer?.close()
-    llamaServer = null
-    nextEnricherAttemptAt = Date.now() + 60_000
-    console.error("Local enrichment runtime could not start:", error)
+    nextEnricherAttemptAt = Date.now() + 30_000
+    console.error("Codex enrichment could not start:", error)
     return null
   }
 }
@@ -409,16 +387,16 @@ async function runEmbeddingJob(jobId: string, mediaId: string, activeEmbedder: B
   notifyLibraryChanged()
 }
 
-async function runEnrichmentJob(jobId: string, mediaId: string, activeEnricher: OpenCodeEnricher): Promise<void> {
+async function runEnrichmentJob(jobId: string, mediaId: string, activeEnricher: CodexEnricher): Promise<void> {
   const chunks = repository.getChunksForEnrichment(mediaId)
   const chunkIds = chunks.map((chunk) => chunk.id)
   let completed = 0
   for (let index = 0; index < chunks.length;) {
     const batch = [] as typeof chunks
     let characters = 0
-    while (index < chunks.length && batch.length < 8) {
+    while (index < chunks.length && batch.length < MAX_CODEX_ENRICHMENT_CHUNKS) {
       const candidate = chunks[index]!
-      if (batch.length > 0 && characters + candidate.transcript.length > 12_000) break
+      if (batch.length > 0 && characters + candidate.transcript.length > MAX_CODEX_ENRICHMENT_CHARACTERS) break
       batch.push(candidate)
       characters += candidate.transcript.length
       index += 1
@@ -433,7 +411,7 @@ async function runEnrichmentJob(jobId: string, mediaId: string, activeEnricher: 
       repository.requeueJob(mediaId, "enrich")
       return
     }
-    repository.applyEnrichments(mediaId, result, "qwen3-4b:v1")
+    repository.applyEnrichments(mediaId, result, CODEX_ENRICHMENT_VERSION)
     completed += batch.length
     repository.updateJob(jobId, { progress: chunks.length ? completed / chunks.length : 1 })
     notifyJobsChanged()
@@ -467,64 +445,13 @@ async function findRuntimeExecutable(name: RuntimeExecutable): Promise<string | 
   return null
 }
 
-async function findLlamaRuntimeCandidates(): Promise<Array<{ path: string; useGpu: boolean }>> {
-  const resourcesPath = process.env.VOD_SEARCH_RESOURCES_PATH
-  const candidates = [
-    process.env.VOD_SEARCH_LLAMA_PATH
-      ? { path: process.env.VOD_SEARCH_LLAMA_PATH, useGpu: process.env.VOD_SEARCH_DISABLE_GPU !== "1" }
-      : null,
-    resourcesPath
-      ? { path: join(resourcesPath, "runtime", "windows", "llama-vulkan", "llama-server.exe"), useGpu: true }
-      : null,
-    resourcesPath
-      ? { path: join(resourcesPath, "runtime", "windows", "llama-cpu", "llama-server.exe"), useGpu: false }
-      : null,
-    resourcesPath
-      ? { path: join(resourcesPath, "runtime", process.platform, "llama-server"), useGpu: false }
-      : null
-  ].filter((value): value is { path: string; useGpu: boolean } => value !== null)
-  const available: Array<{ path: string; useGpu: boolean }> = []
-  for (const candidate of candidates) {
-    try { await access(candidate.path); available.push(candidate) } catch { /* Try the next packaged runtime. */ }
-  }
-  return available
-}
-
-async function findOpenCodeExecutable(): Promise<string | null> {
-  const resourcesPath = process.env.VOD_SEARCH_RESOURCES_PATH
-  const candidates: Array<string | undefined> = [
-    process.env.VOD_SEARCH_OPENCODE_PATH,
-    resourcesPath
-      ? join(resourcesPath, "app.asar.unpacked", "node_modules", "opencode-ai", "bin", "opencode.exe")
-      : undefined
-  ]
-  try {
-    const packageJsonPath = localRequire.resolve("opencode-ai/package.json")
-    const packageExecutable = join(dirname(packageJsonPath), "bin", "opencode.exe")
-    candidates.push(packageExecutable.replace(`${join("app.asar", "node_modules")}`, `${join("app.asar.unpacked", "node_modules")}`))
-  } catch {
-    // A packaged candidate or explicit override may still be available.
-  }
+async function findCodexExecutable(): Promise<string> {
+  const candidates = [process.env.VOD_SEARCH_CODEX_PATH, process.env.VOD_SEARCH_CODEX_MANAGED_PATH]
   for (const candidate of candidates) {
     if (!candidate) continue
-    try { await access(candidate); return candidate } catch { /* Try the next OpenCode location. */ }
+    try { await access(candidate); return candidate } catch { /* Try the next Codex location. */ }
   }
-  return null
-}
-
-async function prepareOpenCodeWorkspace(path: string): Promise<void> {
-  await mkdir(path, { recursive: true })
-  const configPath = join(path, "opencode.json")
-  await writeFile(join(path, "AGENTS.md"), [
-    "# VOD Search Enrichment",
-    "Use only transcript text supplied in the prompt.",
-    "Do not use tools, read files, access the network, or infer visual events."
-  ].join("\n"), "utf8")
-  await writeFile(configPath, JSON.stringify({ plugin: [], mcp: {}, permission: "deny", share: "disabled" }), "utf8")
-  process.env.OPENCODE_CONFIG = configPath
-  process.env.OPENCODE_CONFIG_DIR = path
-  process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ plugin: [], mcp: {}, permission: "deny", share: "disabled" })
-  process.env.OPENCODE_DISABLE_CLAUDE_CODE = "1"
+  return process.platform === "win32" ? "codex.exe" : "codex"
 }
 
 function embeddingText(chunk: ReturnType<Repository["getChunksForEmbedding"]>[number]): string {

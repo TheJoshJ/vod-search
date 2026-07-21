@@ -1,9 +1,11 @@
 # VOD Search
 
-VOD Search is a Windows-first, local video transcript search application. It indexes existing subtitles or local Whisper transcripts, enriches timestamped chunks with a locked-down local OpenCode model, and combines full-text and semantic search.
+VOD Search is a Windows-first video transcript search application. It indexes existing subtitles or local Whisper transcripts, asks Codex to enrich timestamped chunks, and combines full-text and semantic search.
 
 Source videos are referenced in place and are never modified. Transcripts, tags,
 embeddings, and the search index stay under the application's local data folder.
+Only transcript batches are sent to OpenAI when Codex creates summaries and
+search metadata; video and audio files are never uploaded by VOD Search.
 
 ## What works
 
@@ -11,9 +13,10 @@ embeddings, and the search index stay under the application's local data folder.
 - Prefers SRT, VTT, ASS, or embedded captions before transcribing audio.
 - Runs `whisper.cpp` locally with the free, open-source Whisper small.en model.
 - Creates overlapping timestamped chunks and an SQLite FTS5 search index.
-- Optionally adds local BGE embeddings for meaning-based retrieval.
-- Optionally asks a local Qwen model through an isolated OpenCode server for
-  summaries, entities, events, aliases, and likely search phrases.
+- Adds local BGE embeddings for meaning-based retrieval.
+- Runs `codex exec` with a bundled transcript-enrichment skill and a strict JSON
+  schema to create summaries, entities, events, aliases, and likely search
+  phrases.
 - Opens matching videos in a full-width player with timestamp markers plus
   transcript and summary tabs.
 - Persists background jobs, resumes interrupted work, pauses on battery, and
@@ -25,16 +28,26 @@ extension.
 
 ## First run
 
-1. Open **Settings** and install Whisper small.en. Install BGE for semantic
-   search and Qwen for richer event/tag search if desired.
-2. Open **Library**, add one or more folders, and leave the app running while
+1. Open **Settings** and install Codex, then select **Sign in** to authenticate
+   with ChatGPT or an OpenAI account. If Codex is already installed, VOD Search
+   detects it.
+2. Install Whisper small.en and the semantic search index. Both are downloaded
+   and managed inside the app.
+3. Open **Library**, add one or more folders, and leave the app running while
    the Activity queue processes them.
-3. Search for spoken words, names, or descriptions such as “death to Kalphite
+4. Search for spoken words, names, or descriptions such as “death to Kalphite
    King,” then open a result at its timestamp.
 
 Model downloads are pinned and SHA-256 verified. Whisper is about 465 MB, BGE
-is about 128 MB, and Qwen is about 2.3 GB. Basic full-text search only requires
-Whisper (or existing subtitles); the other models are optional.
+is about 128 MB, and no local generative model is downloaded. Basic full-text
+search only requires Whisper (or existing subtitles); BGE supplies semantic
+similarity, while Codex supplies richer summaries and event metadata.
+
+The packaged Windows application includes Electron, FFmpeg, and `whisper.cpp`.
+End users do not need Node.js, Python, pnpm, or a terminal. The Settings page
+uses OpenAI's official standalone Windows installer for Codex, which downloads
+checksum-verified release assets into Codex's standard per-user storage and
+places the app-managed command under the VOD Search application-data folder.
 
 ## Development
 
@@ -58,11 +71,11 @@ pnpm test
 pnpm build
 ```
 
-The bundled Windows runtimes are checksum-pinned builds of FFmpeg, whisper.cpp,
-and llama.cpp. They are downloaded into an ignored `resources/runtime/windows`
+The bundled Windows runtimes are checksum-pinned builds of FFmpeg and
+`whisper.cpp`. They are downloaded into an ignored `resources/runtime/windows`
 directory. Developers can override them with `VOD_SEARCH_FFMPEG_PATH`,
 `VOD_SEARCH_FFPROBE_PATH`, `VOD_SEARCH_WHISPER_PATH`, and
-`VOD_SEARCH_LLAMA_PATH`.
+`VOD_SEARCH_CODEX_PATH`.
 
 ## Windows installer
 
@@ -84,5 +97,5 @@ installer artifact on a Windows runner.
 - `packages/database`: SQLite schema, FTS5/`sqlite-vec`, and repositories.
 - `packages/search`: subtitle parsing, chunking, lexical/semantic rank fusion.
 - `packages/inference`: verified models, FFmpeg/Whisper adapters, local BGE,
-  llama.cpp, and the restricted OpenCode enrichment client.
+  and the schema-validated Codex enrichment client and skill.
 - `packages/contracts`: validated domain and IPC contracts shared by processes.

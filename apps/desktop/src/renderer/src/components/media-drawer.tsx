@@ -255,7 +255,7 @@ function TranscriptPanel({ detail, onJump, activeMs }: { detail: MediaDetail; on
 
 function SummaryPanel({ detail, onJump }: { detail: MediaDetail; onJump: (ms: number) => void }): React.JSX.Element {
   const overview = useMemo(() => detail.summaries.map((section) => section.summary).join(" "), [detail.summaries])
-  if (detail.summaries.length === 0) return <EmptyPanel title="No summary yet" body="Install the enrichment model in Settings to generate local summaries, entities, and events." />
+  if (detail.summaries.length === 0) return <EmptyPanel title="No summary yet" body="Install and sign in to Codex in Settings to generate summaries, entities, and events." />
   return (
     <div className="mx-auto max-w-4xl px-7 py-6">
       <div className="mb-5 rounded-xl border bg-accent/60 p-5">

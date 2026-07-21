@@ -1,5 +1,6 @@
 import { z } from "zod"
 import {
+  codexStatusSchema,
   jobSchema,
   libraryStatsSchema,
   mediaAssetSchema,
@@ -24,11 +25,15 @@ export const ipcChannels = {
   modelsList: "models:list",
   modelsDownload: "models:download",
   modelsCancelDownload: "models:cancel-download",
+  codexStatus: "codex:status",
+  codexInstall: "codex:install",
+  codexLogin: "codex:login",
   mediaPlaybackSource: "media:playback-source",
   mediaDetail: "media:detail",
   eventLibraryChanged: "event:library-changed",
   eventJobsChanged: "event:jobs-changed",
-  eventModelsChanged: "event:models-changed"
+  eventModelsChanged: "event:models-changed",
+  eventCodexChanged: "event:codex-changed"
 } as const
 
 export const addFolderRequestSchema = z.object({ path: z.string().min(1) })
@@ -65,6 +70,11 @@ export interface VodSearchApi {
     download(modelId: string): Promise<void>
     cancelDownload(modelId: string): Promise<void>
   }
+  codex: {
+    status(): Promise<z.infer<typeof codexStatusSchema>>
+    install(): Promise<z.infer<typeof codexStatusSchema>>
+    login(): Promise<z.infer<typeof codexStatusSchema>>
+  }
   media: {
     getPlaybackSource(mediaId: string): Promise<z.infer<typeof mediaPlaybackResponseSchema>>
     getDetail(mediaId: string): Promise<z.infer<typeof mediaDetailSchema>>
@@ -73,5 +83,6 @@ export interface VodSearchApi {
     onLibraryChanged(listener: () => void): () => void
     onJobsChanged(listener: () => void): () => void
     onModelsChanged(listener: () => void): () => void
+    onCodexChanged(listener: () => void): () => void
   }
 }

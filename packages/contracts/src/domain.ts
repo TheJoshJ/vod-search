@@ -141,7 +141,7 @@ export const libraryStatsSchema = z.object({
 })
 export type LibraryStats = z.infer<typeof libraryStatsSchema>
 
-export const modelRoleSchema = z.enum(["transcription", "enrichment", "embedding"])
+export const modelRoleSchema = z.enum(["transcription", "embedding"])
 export type ModelRole = z.infer<typeof modelRoleSchema>
 
 export const modelManifestEntrySchema = z.object({
@@ -168,3 +168,23 @@ export const modelInstallationSchema = z.object({
   error: z.string().nullable()
 })
 export type ModelInstallation = z.infer<typeof modelInstallationSchema>
+
+export const codexStatusSchema = z.object({
+  state: z.enum([
+    "checking",
+    "missing",
+    "installing",
+    "signed-out",
+    "signing-in",
+    "ready",
+    "updating",
+    "unsupported",
+    "error"
+  ]),
+  installed: z.boolean(),
+  authenticated: z.boolean(),
+  version: z.string().nullable(),
+  managed: z.boolean(),
+  error: z.string().nullable()
+})
+export type CodexStatus = z.infer<typeof codexStatusSchema>

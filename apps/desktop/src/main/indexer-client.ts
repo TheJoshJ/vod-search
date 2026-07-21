@@ -31,7 +31,7 @@ export class IndexerClient {
   }>()
   private readonly listeners = new Map<string, Set<(payload: unknown) => void>>()
 
-  async start(databasePath: string, modelsPath: string, resourcesPath: string): Promise<void> {
+  async start(databasePath: string, modelsPath: string, resourcesPath: string, managedCodexPath: string): Promise<void> {
     if (this.child) return
     const entry = join(__dirname, "indexer.js")
     const child = utilityProcess.fork(entry, [], {
@@ -41,7 +41,7 @@ export class IndexerClient {
         VOD_SEARCH_DB_PATH: databasePath,
         VOD_SEARCH_MODELS_PATH: modelsPath,
         VOD_SEARCH_RESOURCES_PATH: resourcesPath,
-        OPENCODE_DISABLE_CLAUDE_CODE: "1"
+        VOD_SEARCH_CODEX_MANAGED_PATH: managedCodexPath
       },
       stdio: "pipe"
     })

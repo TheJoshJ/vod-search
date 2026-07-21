@@ -24,7 +24,6 @@ export interface ModelPackageManifest {
 }
 
 const whisperRevision = "5359861c739e955e79d9a303bcbc70fb988958b1"
-const qwenRevision = "bc640142c66e1fdd12af0bd68f40445458f3869b"
 const bgeRevision = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
 
 export const defaultModelPackages: ModelPackageManifest[] = [
@@ -40,20 +39,6 @@ export const defaultModelPackages: ModelPackageManifest[] = [
       url: `https://huggingface.co/ggerganov/whisper.cpp/resolve/${whisperRevision}/ggml-small.en.bin`,
       sizeBytes: 487_614_201,
       sha256: "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d"
-    }]
-  },
-  {
-    id: "qwen3-4b-q4-k-m",
-    version: qwenRevision,
-    role: "enrichment",
-    displayName: "Qwen3 4B Q4_K_M",
-    license: "Apache-2.0",
-    licenseUrl: "https://huggingface.co/Qwen/Qwen3-4B-GGUF/blob/main/LICENSE",
-    files: [{
-      path: "Qwen3-4B-Q4_K_M.gguf",
-      url: `https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/${qwenRevision}/Qwen3-4B-Q4_K_M.gguf`,
-      sizeBytes: 2_497_280_256,
-      sha256: "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5"
     }]
   },
   {

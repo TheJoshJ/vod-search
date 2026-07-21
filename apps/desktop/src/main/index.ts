@@ -17,6 +17,7 @@ import {
   searchRequestSchema
 } from "@vod-search/contracts"
 import { IndexerClient } from "./indexer-client.js"
+import { CodexManager } from "./codex-manager.js"
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -29,15 +30,24 @@ const localAppData = process.env.LOCALAPPDATA
 if (localAppData) app.setPath("userData", join(localAppData, "VOD Search"))
 
 const indexer = new IndexerClient()
+let codex: CodexManager | null = null
 let mainWindow: BrowserWindow | null = null
 let manuallyPaused = false
 let pausedForBattery = false
 
 app.whenReady().then(async () => {
+  codex = new CodexManager(
+    join(app.getPath("userData"), "tools", "codex", "bin"),
+    () => {
+      broadcast(ipcChannels.eventCodexChanged)
+      void indexer.request("codex:refresh").catch(() => undefined)
+    }
+  )
   await indexer.start(
     join(app.getPath("userData"), "index", "vod-search.db"),
     join(app.getPath("userData"), "models"),
-    app.isPackaged ? process.resourcesPath : join(app.getAppPath(), "..", "..", "resources")
+    app.isPackaged ? process.resourcesPath : join(app.getAppPath(), "..", "..", "resources"),
+    codex.managedExecutablePath
   )
   registerProtocol()
   registerIpc()
@@ -111,6 +121,9 @@ function registerIpc(): void {
     indexer.request("models:download", String(modelId), 24 * 60 * 60 * 1000))
   ipcMain.handle(ipcChannels.modelsCancelDownload, (_event, modelId) =>
     indexer.request("models:cancel-download", String(modelId)))
+  ipcMain.handle(ipcChannels.codexStatus, () => requireCodexManager().status())
+  ipcMain.handle(ipcChannels.codexInstall, () => requireCodexManager().install())
+  ipcMain.handle(ipcChannels.codexLogin, () => requireCodexManager().login())
   ipcMain.handle(ipcChannels.mediaPlaybackSource, async (_event, payload) => {
     const { mediaId } = mediaPlaybackRequestSchema.parse(payload)
     const path = await indexer.request<string | null>("media:path", mediaId)
@@ -118,6 +131,11 @@ function registerIpc(): void {
   })
   ipcMain.handle(ipcChannels.mediaDetail, (_event, mediaId) =>
     indexer.request("media:detail", String(mediaId)))
+}
+
+function requireCodexManager(): CodexManager {
+  if (!codex) throw new Error("Codex manager is not ready")
+  return codex
 }
 
 function registerProtocol(): void {

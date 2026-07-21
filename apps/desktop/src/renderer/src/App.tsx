@@ -1,5 +1,5 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react"
-import type { Job, LibraryStats, MediaAsset, ModelInstallation, SearchHit, SearchMode, SourceFolder } from "@vod-search/contracts"
+import type { CodexStatus, Job, LibraryStats, MediaAsset, ModelInstallation, SearchHit, SearchMode, SourceFolder } from "@vod-search/contracts"
 import {
   Activity,
   CalendarRange,
@@ -49,12 +49,22 @@ const emptyStats: LibraryStats = {
   failedJobs: 0
 }
 
+const checkingCodex: CodexStatus = {
+  state: "checking",
+  installed: false,
+  authenticated: false,
+  version: null,
+  managed: false,
+  error: null
+}
+
 export function App(): React.JSX.Element {
   const [view, setView] = useState<View>("library")
   const [folders, setFolders] = useState<SourceFolder[]>([])
   const [media, setMedia] = useState<MediaAsset[]>([])
   const [jobs, setJobs] = useState<Job[]>([])
   const [models, setModels] = useState<ModelInstallation[]>([])
+  const [codex, setCodex] = useState<CodexStatus>(checkingCodex)
   const [stats, setStats] = useState<LibraryStats>(emptyStats)
   const [selection, setSelection] = useState<MediaDrawerSelection | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -77,6 +87,7 @@ export function App(): React.JSX.Element {
 
   const refreshJobs = useCallback(async () => setJobs(await window.vodSearch.jobs.list()), [])
   const refreshModels = useCallback(async () => setModels(await window.vodSearch.models.list()), [])
+  const refreshCodex = useCallback(async () => setCodex(await window.vodSearch.codex.status()), [])
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark")
@@ -87,14 +98,16 @@ export function App(): React.JSX.Element {
     void refreshLibrary().catch(showError)
     void refreshJobs().catch(showError)
     void refreshModels().catch(showError)
+    void refreshCodex().catch(showError)
     const removeLibraryListener = window.vodSearch.events.onLibraryChanged(() => void refreshLibrary().catch(showError))
     const removeJobsListener = window.vodSearch.events.onJobsChanged(() => {
       void refreshJobs().catch(showError)
       void refreshLibrary().catch(showError)
     })
     const removeModelsListener = window.vodSearch.events.onModelsChanged(() => void refreshModels().catch(showError))
-    return () => { removeLibraryListener(); removeJobsListener(); removeModelsListener() }
-  }, [refreshJobs, refreshLibrary, refreshModels])
+    const removeCodexListener = window.vodSearch.events.onCodexChanged(() => void refreshCodex().catch(showError))
+    return () => { removeLibraryListener(); removeJobsListener(); removeModelsListener(); removeCodexListener() }
+  }, [refreshCodex, refreshJobs, refreshLibrary, refreshModels])
 
   function showError(reason: unknown): void {
     setError(reason instanceof Error ? reason.message : String(reason))
@@ -138,10 +151,12 @@ export function App(): React.JSX.Element {
           <SettingsDashboard
             folders={folders}
             models={models}
+            codex={codex}
             theme={theme}
             setTheme={setTheme}
             onAddFolder={() => void addFolder()}
             onRefreshModels={refreshModels}
+            onRefreshCodex={refreshCodex}
             onError={showError}
           />
         )}
@@ -168,7 +183,7 @@ function Sidebar({
     <aside className="flex w-[17rem] shrink-0 flex-col border-r border-sidebar-border bg-sidebar p-4 text-sidebar-foreground max-lg:w-[4.5rem] max-lg:px-3">
       <div className="flex h-11 items-center gap-3 px-2">
         <div className="grid size-9 shrink-0 place-items-center rounded-xl bg-sidebar-primary text-sidebar-primary-foreground shadow-sm"><Video className="size-4.5" /></div>
-        <div className="min-w-0 max-lg:hidden"><div className="truncate text-sm font-bold">VOD Search</div><div className="truncate text-[11px] text-muted-foreground">Private video index</div></div>
+        <div className="min-w-0 max-lg:hidden"><div className="truncate text-sm font-bold">VOD Search</div><div className="truncate text-[11px] text-muted-foreground">Personal video index</div></div>
       </div>
       <nav className="mt-8 space-y-1">
         <SidebarButton active={view === "library"} icon={Library} label="Videos" onClick={() => setView("library")} />
@@ -179,7 +194,7 @@ function Sidebar({
         <div className="rounded-xl border border-sidebar-border bg-background/55 p-3 max-lg:hidden">
           <div className="mb-2 flex items-center justify-between text-xs"><span className="text-muted-foreground">Local index</span><CheckCircle2 className="size-3.5 text-chart-1" /></div>
           <div className="text-sm font-semibold">{stats.searchableChunks.toLocaleString()} moments</div>
-          <div className="mt-1 text-[11px] text-muted-foreground">{stats.totalMedia.toLocaleString()} videos · offline</div>
+          <div className="mt-1 text-[11px] text-muted-foreground">{stats.totalMedia.toLocaleString()} videos · on-device index</div>
         </div>
         <Button variant="ghost" className="w-full justify-start gap-3 px-3 max-lg:justify-center max-lg:px-0" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
           {theme === "dark" ? <Sun /> : <Moon />}<span className="max-lg:hidden">{theme === "dark" ? "Light mode" : "Dark mode"}</span>
@@ -405,14 +420,31 @@ function ActivityDashboard({ jobs, media, stats, onError }: { jobs: Job[]; media
   )
 }
 
-function SettingsDashboard({ folders, models, theme, setTheme, onAddFolder, onRefreshModels, onError }: { folders: SourceFolder[]; models: ModelInstallation[]; theme: Theme; setTheme: (theme: Theme) => void; onAddFolder: () => void; onRefreshModels: () => Promise<void>; onError: (error: unknown) => void }): React.JSX.Element {
+function SettingsDashboard({ folders, models, codex, theme, setTheme, onAddFolder, onRefreshModels, onRefreshCodex, onError }: { folders: SourceFolder[]; models: ModelInstallation[]; codex: CodexStatus; theme: Theme; setTheme: (theme: Theme) => void; onAddFolder: () => void; onRefreshModels: () => Promise<void>; onRefreshCodex: () => Promise<void>; onError: (error: unknown) => void }): React.JSX.Element {
   async function download(modelId: string): Promise<void> { try { await window.vodSearch.models.download(modelId) } catch (error) { onError(error) } finally { await onRefreshModels() } }
+  async function runCodex(action: () => Promise<CodexStatus>): Promise<void> { try { await action() } catch (error) { onError(error) } finally { await onRefreshCodex() } }
+  const codexBusy = ["checking", "installing", "updating", "signing-in"].includes(codex.state)
   return (
-    <DashboardPage title="Settings" description="Models, source folders, and background resource limits." actions={<Button onClick={onAddFolder}><Plus />Add folder</Button>}>
+    <DashboardPage title="Settings" description="AI setup, source folders, and background resource limits." actions={<Button onClick={onAddFolder}><Plus />Add folder</Button>}>
       <div className="grid grid-cols-[minmax(0,1fr)_22rem] gap-6 max-xl:grid-cols-1">
         <div className="space-y-6">
           <Card className="overflow-hidden">
-            <SettingHeader icon={WandSparkles} title="Local models" description="Install only the capabilities you need. Every artifact is checksum verified." />
+            <SettingHeader icon={WandSparkles} title="Codex enrichment" description="Codex turns transcripts into summaries and searchable event metadata." />
+            <div className="flex items-center gap-4 px-5 py-5">
+              <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-accent text-accent-foreground"><Sparkles className="size-4" /></div>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2"><div className="text-sm font-semibold">Codex CLI</div><Badge variant={codex.state === "ready" ? "accent" : codex.state === "error" ? "destructive" : "secondary"}>{codexStatusLabel(codex)}</Badge></div>
+                <div className="mt-1 text-xs leading-5 text-muted-foreground">Uses your ChatGPT or OpenAI account. Transcript text is sent to OpenAI for enrichment{codex.version ? ` · Version ${codex.version}` : "."}</div>
+                {codex.error && <div className="mt-2 text-xs text-destructive">{codex.error}</div>}
+              </div>
+              <div className="flex shrink-0 gap-2">
+                {codex.installed && !codex.authenticated && <Button disabled={codexBusy} onClick={() => void runCodex(() => window.vodSearch.codex.login())}>{codex.state === "signing-in" ? <LoaderCircle className="animate-spin" /> : null}Sign in</Button>}
+                {codex.state !== "unsupported" && <Button variant={codex.installed ? "outline" : "default"} disabled={codexBusy} onClick={() => void runCodex(() => window.vodSearch.codex.install())}>{["installing", "updating"].includes(codex.state) ? <LoaderCircle className="animate-spin" /> : null}{codex.installed ? "Update" : "Install Codex"}</Button>}
+              </div>
+            </div>
+          </Card>
+          <Card className="overflow-hidden">
+            <SettingHeader icon={HardDrive} title="On-device components" description="No separate Node or Python installation is required." />
             <div className="divide-y">
               {models.map((model) => (
                 <div key={model.modelId} className="flex items-center gap-4 px-5 py-4">
@@ -435,7 +467,7 @@ function SettingsDashboard({ folders, models, theme, setTheme, onAddFolder, onRe
         <div className="space-y-6">
           <Card className="p-5"><div className="flex items-start justify-between gap-4"><div><h3 className="text-sm font-semibold">Dark appearance</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">Use the supplied dark theme throughout the dashboard.</p></div><Switch checked={theme === "dark"} onCheckedChange={(checked) => setTheme(checked ? "dark" : "light")} /></div></Card>
           <Card className="p-5"><h3 className="text-sm font-semibold">Resource mode</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">Controls how many CPU threads transcription may use.</p><Select defaultValue="normal" onValueChange={(value) => void window.vodSearch.jobs.setResourceMode(value as "low" | "normal" | "high").catch(onError)}><SelectTrigger className="mt-4 w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="low">Low impact</SelectItem><SelectItem value="normal">Balanced</SelectItem><SelectItem value="high">High performance</SelectItem></SelectContent></Select></Card>
-          <Card className="p-5"><div className="mb-3 flex items-center gap-2 text-sm font-semibold"><HardDrive className="size-4 text-primary" />Storage and privacy</div><p className="text-xs leading-5 text-muted-foreground">Transcripts, summaries, and embeddings stay in the local application data folder. Models are contacted only through loopback services.</p><div className="mt-4 flex items-center gap-2 text-xs font-medium text-chart-1"><span className="size-1.5 rounded-full bg-chart-1" />Offline processing active</div></Card>
+          <Card className="p-5"><div className="mb-3 flex items-center gap-2 text-sm font-semibold"><HardDrive className="size-4 text-primary" />Storage and privacy</div><p className="text-xs leading-5 text-muted-foreground">Videos, transcripts, summaries, embeddings, and the search index remain in local application data. Codex receives transcript batches when it creates enrichment metadata.</p><div className="mt-4 flex items-center gap-2 text-xs font-medium text-primary"><span className="size-1.5 rounded-full bg-primary" />Local index · cloud enrichment</div></Card>
         </div>
       </div>
     </DashboardPage>
@@ -515,9 +547,23 @@ function humanize(value: string): string {
 }
 
 function modelName(modelId: string): string {
-  return ({ "whisper-small-en": "Whisper small.en", "qwen3-4b-q4-k-m": "Qwen3 4B", "bge-small-en-v1.5": "BGE small English" } as Record<string, string>)[modelId] ?? modelId
+  return ({ "whisper-small-en": "Whisper small.en", "bge-small-en-v1.5": "Semantic search index" } as Record<string, string>)[modelId] ?? modelId
 }
 
 function modelDescription(modelId: string): string {
-  return ({ "whisper-small-en": "Local speech transcription", "qwen3-4b-q4-k-m": "Summaries, events, and entity tags", "bge-small-en-v1.5": "Semantic similarity search" } as Record<string, string>)[modelId] ?? "Local model"
+  return ({ "whisper-small-en": "Local speech transcription", "bge-small-en-v1.5": "Local vector encoder for meaning-based search" } as Record<string, string>)[modelId] ?? "Local component"
+}
+
+function codexStatusLabel(status: CodexStatus): string {
+  return ({
+    checking: "Checking",
+    missing: "Not installed",
+    installing: "Installing",
+    "signed-out": "Sign-in required",
+    "signing-in": "Signing in",
+    ready: "Ready",
+    updating: "Updating",
+    unsupported: "Manual setup required",
+    error: "Needs attention"
+  } as const)[status.state]
 }

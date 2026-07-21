@@ -1,4 +1,5 @@
 import type {
+  CodexStatus,
   Job,
   LibraryStats,
   MediaAsset,
@@ -59,9 +60,17 @@ const jobs: Job[] = [
 
 const models: ModelInstallation[] = [
   { modelId: "whisper-small-en", version: "1", role: "transcription", status: "installed", bytesDownloaded: 488_000_000, sizeBytes: 488_000_000, path: "models/whisper-small-en", error: null },
-  { modelId: "qwen3-4b-q4-k-m", version: "1", role: "enrichment", status: "installed", bytesDownloaded: 2_650_000_000, sizeBytes: 2_650_000_000, path: "models/qwen3-4b", error: null },
   { modelId: "bge-small-en-v1.5", version: "1", role: "embedding", status: "installed", bytesDownloaded: 133_000_000, sizeBytes: 133_000_000, path: "models/bge-small", error: null }
 ]
+
+const codex: CodexStatus = {
+  state: "ready",
+  installed: true,
+  authenticated: true,
+  version: "0.144.5",
+  managed: true,
+  error: null
+}
 
 const stats: LibraryStats = {
   sourceFolders: 1,
@@ -98,6 +107,11 @@ export function createDevMockApi(): VodSearchApi {
       download: async () => undefined,
       cancelDownload: async () => undefined
     },
+    codex: {
+      status: async () => codex,
+      install: async () => codex,
+      login: async () => codex
+    },
     media: {
       getPlaybackSource: async () => ({ url: "", available: false }),
       getDetail: async (mediaId) => detailFor(media.find((item) => item.id === mediaId) ?? media[0]!)
@@ -105,7 +119,8 @@ export function createDevMockApi(): VodSearchApi {
     events: {
       onLibraryChanged: () => () => undefined,
       onJobsChanged: () => () => undefined,
-      onModelsChanged: () => () => undefined
+      onModelsChanged: () => () => undefined,
+      onCodexChanged: () => () => undefined
     }
   }
 }

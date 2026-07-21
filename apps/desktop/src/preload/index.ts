@@ -34,6 +34,11 @@ const api: VodSearchApi = {
     download: (modelId) => ipcRenderer.invoke(ipcChannels.modelsDownload, modelId),
     cancelDownload: (modelId) => ipcRenderer.invoke(ipcChannels.modelsCancelDownload, modelId)
   },
+  codex: {
+    status: () => ipcRenderer.invoke(ipcChannels.codexStatus),
+    install: () => ipcRenderer.invoke(ipcChannels.codexInstall),
+    login: () => ipcRenderer.invoke(ipcChannels.codexLogin)
+  },
   media: {
     getPlaybackSource: (mediaId) => ipcRenderer.invoke(ipcChannels.mediaPlaybackSource, { mediaId }),
     getDetail: (mediaId) => ipcRenderer.invoke(ipcChannels.mediaDetail, mediaId)
@@ -41,7 +46,8 @@ const api: VodSearchApi = {
   events: {
     onLibraryChanged: (listener) => subscribe(ipcChannels.eventLibraryChanged, listener),
     onJobsChanged: (listener) => subscribe(ipcChannels.eventJobsChanged, listener),
-    onModelsChanged: (listener) => subscribe(ipcChannels.eventModelsChanged, listener)
+    onModelsChanged: (listener) => subscribe(ipcChannels.eventModelsChanged, listener),
+    onCodexChanged: (listener) => subscribe(ipcChannels.eventCodexChanged, listener)
   }
 }
 
