@@ -35,7 +35,8 @@ const api: VodSearchApi = {
     cancelDownload: (modelId) => ipcRenderer.invoke(ipcChannels.modelsCancelDownload, modelId)
   },
   media: {
-    getPlaybackSource: (mediaId) => ipcRenderer.invoke(ipcChannels.mediaPlaybackSource, { mediaId })
+    getPlaybackSource: (mediaId) => ipcRenderer.invoke(ipcChannels.mediaPlaybackSource, { mediaId }),
+    getDetail: (mediaId) => ipcRenderer.invoke(ipcChannels.mediaDetail, mediaId)
   },
   events: {
     onLibraryChanged: (listener) => subscribe(ipcChannels.eventLibraryChanged, listener),

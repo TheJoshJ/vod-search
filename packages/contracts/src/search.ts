@@ -1,7 +1,13 @@
 import { z } from "zod"
 
+export const searchModeSchema = z.enum(["hybrid", "semantic", "keyword"])
+export type SearchMode = z.infer<typeof searchModeSchema>
+
 export const searchRequestSchema = z.object({
   query: z.string().trim().min(1).max(500),
+  mode: searchModeSchema.default("hybrid"),
+  createdAfterMs: z.number().int().nonnegative().optional(),
+  createdBeforeMs: z.number().int().nonnegative().optional(),
   sourceFolderIds: z.array(z.string()).max(100).optional(),
   includeMissing: z.boolean().default(false),
   limit: z.number().int().min(1).max(100).default(20)
@@ -13,6 +19,8 @@ export const matchReasonSchema = z.enum(["exact", "transcript", "tag", "semantic
 export const searchHitSchema = z.object({
   mediaId: z.string(),
   title: z.string(),
+  relativePath: z.string(),
+  createdAtMs: z.number().int().nonnegative(),
   startMs: z.number().int().nonnegative(),
   endMs: z.number().int().nonnegative(),
   transcriptExcerpt: z.string(),
@@ -31,4 +39,3 @@ export const searchResponseSchema = z.object({
   indexedChunkCount: z.number().int().nonnegative()
 })
 export type SearchResponse = z.infer<typeof searchResponseSchema>
-

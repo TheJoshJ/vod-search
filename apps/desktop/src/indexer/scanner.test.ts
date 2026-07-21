@@ -38,6 +38,7 @@ describe("scanSourceFolder", () => {
       expect(media[0]!.highestCompletedStage).toBe("chunked")
       const response = new SearchService(repository).search({
         query: "died KK",
+        mode: "hybrid",
         includeMissing: false,
         limit: 20
       })

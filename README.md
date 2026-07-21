@@ -14,7 +14,8 @@ embeddings, and the search index stay under the application's local data folder.
 - Optionally adds local BGE embeddings for meaning-based retrieval.
 - Optionally asks a local Qwen model through an isolated OpenCode server for
   summaries, entities, events, aliases, and likely search phrases.
-- Opens a matching video at the approximate timestamp from a search result.
+- Opens matching videos in a full-width player with timestamp markers plus
+  transcript and summary tabs.
 - Persists background jobs, resumes interrupted work, pauses on battery, and
   keeps moved-file identity through content fingerprints.
 
@@ -37,18 +38,24 @@ Whisper (or existing subtitles); the other models are optional.
 
 ## Development
 
+Install the pinned package manager once if `pnpm` is not already available:
+
 ```bash
-corepack pnpm install
-corepack pnpm prepare:runtimes:win
-corepack pnpm dev
+npm install --global pnpm@11.15.1
+```
+
+```bash
+pnpm install
+pnpm prepare:runtimes:win
+pnpm dev
 ```
 
 Run validation with:
 
 ```bash
-corepack pnpm typecheck
-corepack pnpm test
-corepack pnpm build
+pnpm typecheck
+pnpm test
+pnpm build
 ```
 
 The bundled Windows runtimes are checksum-pinned builds of FFmpeg, whisper.cpp,
@@ -62,7 +69,7 @@ directory. Developers can override them with `VOD_SEARCH_FFMPEG_PATH`,
 Run this on Windows:
 
 ```bash
-corepack pnpm package:win
+pnpm package:win
 ```
 
 The NSIS installer is written to `release/`. Native Electron modules must be

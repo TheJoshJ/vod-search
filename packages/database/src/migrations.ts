@@ -154,6 +154,15 @@ const migrations: Migration[] = [
         updated_at_ms INTEGER NOT NULL
       );
     `
+  },
+  {
+    version: 2,
+    name: "media_creation_time",
+    sql: `
+      ALTER TABLE media_assets ADD COLUMN created_at_ms INTEGER;
+      UPDATE media_assets SET created_at_ms = modified_at_ms WHERE created_at_ms IS NULL;
+      CREATE INDEX media_assets_created_at_idx ON media_assets(created_at_ms DESC);
+    `
   }
 ]
 
@@ -181,4 +190,3 @@ export function migrate(db: Database.Database): void {
     })()
   }
 }
-

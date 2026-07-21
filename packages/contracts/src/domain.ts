@@ -53,6 +53,7 @@ export const mediaAssetSchema = z.object({
   relativePath: z.string(),
   durationMs: z.number().int().nonnegative().nullable(),
   sizeBytes: z.number().int().nonnegative(),
+  createdAtMs: z.number().int().nonnegative(),
   modifiedAtMs: z.number().int().nonnegative(),
   quickFingerprint: z.string(),
   availability: z.enum(["available", "missing"]),
@@ -73,6 +74,22 @@ export const transcriptSegmentSchema = z.object({
   confidence: z.number().min(0).max(1).nullable()
 })
 export type TranscriptSegment = z.infer<typeof transcriptSegmentSchema>
+
+export const mediaSummarySectionSchema = z.object({
+  startMs: z.number().int().nonnegative(),
+  endMs: z.number().int().nonnegative(),
+  summary: z.string(),
+  entities: z.array(z.string()),
+  events: z.array(z.string())
+})
+export type MediaSummarySection = z.infer<typeof mediaSummarySectionSchema>
+
+export const mediaDetailSchema = z.object({
+  media: mediaAssetSchema,
+  transcript: z.array(transcriptSegmentSchema),
+  summaries: z.array(mediaSummarySectionSchema)
+})
+export type MediaDetail = z.infer<typeof mediaDetailSchema>
 
 export const enrichmentEntitySchema = z.object({
   name: z.string().min(1).max(120),
@@ -151,4 +168,3 @@ export const modelInstallationSchema = z.object({
   error: z.string().nullable()
 })
 export type ModelInstallation = z.infer<typeof modelInstallationSchema>
-

@@ -97,7 +97,7 @@ async function dispatch(method: string, payload: unknown): Promise<unknown> {
     }
     case "search:query": {
       const input = searchRequestSchema.parse(payload)
-      const activeEmbedder = await getEmbedder()
+      const activeEmbedder = input.mode === "keyword" ? null : await getEmbedder()
       const queryEmbedding = activeEmbedder ? await activeEmbedder.embedQuery(input.query) : undefined
       return search.search(input, queryEmbedding)
     }
@@ -109,6 +109,14 @@ async function dispatch(method: string, payload: unknown): Promise<unknown> {
     case "models:download": await models.install(String(payload)); return undefined
     case "models:cancel-download": models.cancel(String(payload)); return undefined
     case "media:path": return repository.getMediaPath(String(payload))
+    case "media:detail": {
+      const mediaId = String(payload)
+      return {
+        media: repository.getMedia(mediaId),
+        transcript: repository.getTranscript(mediaId),
+        summaries: repository.getMediaSummaries(mediaId)
+      }
+    }
     default: throw new Error(`Unknown indexer method: ${method}`)
   }
 }

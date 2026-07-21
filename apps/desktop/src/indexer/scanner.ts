@@ -51,6 +51,7 @@ export async function scanSourceFolder(
         canonicalPath,
         displayName: basename(canonicalPath),
         sizeBytes: fileStat.size,
+        createdAtMs: Math.round(fileStat.birthtimeMs > 0 ? fileStat.birthtimeMs : fileStat.mtimeMs),
         modifiedAtMs: Math.round(fileStat.mtimeMs),
         quickFingerprint: await quickFingerprint(canonicalPath, fileStat.size)
       })

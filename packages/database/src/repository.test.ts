@@ -27,12 +27,105 @@ describe("Repository", () => {
 
       const response = new SearchService(repository).search({
         query: "died kalphite king",
+        mode: "hybrid",
         includeMissing: false,
         limit: 20
       })
       expect(response.indexedChunkCount).toBe(1)
       expect(response.hits).toHaveLength(1)
-      expect(response.hits[0]).toMatchObject({ mediaId: media.id, startMs: 45_000 })
+      expect(response.hits[0]).toMatchObject({
+        mediaId: media.id,
+        relativePath: "boss-fight.mp4",
+        createdAtMs: 100,
+        startMs: 45_000
+      })
+    } finally {
+      database.close()
+    }
+  })
+
+  it("filters timestamp results by the media creation date", () => {
+    const database = openDatabase(":memory:")
+    try {
+      const repository = new Repository(database.db)
+      const folder = repository.addSourceFolder("C:\\videos", "C:\\videos")
+      for (const [name, createdAtMs] of [["old.mp4", 100], ["new.mp4", 300]] as const) {
+        const media = repository.upsertMedia({
+          sourceFolderId: folder.id,
+          relativePath: name,
+          canonicalPath: `C:\\videos\\${name}`,
+          displayName: name,
+          sizeBytes: createdAtMs,
+          createdAtMs,
+          modifiedAtMs: createdAtMs,
+          quickFingerprint: `fixture-${name}`
+        })
+        repository.replaceChunks(media.id, "chunk-v1", [{
+          startMs: 0,
+          endMs: 10_000,
+          transcript: "Kalphite King death review"
+        }])
+      }
+
+      const service = new SearchService(repository)
+      const recent = service.search({
+        query: "kalphite king",
+        mode: "keyword",
+        createdAfterMs: 200,
+        includeMissing: false,
+        limit: 20
+      })
+      const older = service.search({
+        query: "kalphite king",
+        mode: "keyword",
+        createdBeforeMs: 200,
+        includeMissing: false,
+        limit: 20
+      })
+      expect(recent.hits.map((hit) => hit.title)).toEqual(["new.mp4"])
+      expect(older.hits.map((hit) => hit.title)).toEqual(["old.mp4"])
+    } finally {
+      database.close()
+    }
+  })
+
+  it("returns enriched summary sections for the media drawer", () => {
+    const database = openDatabase(":memory:")
+    try {
+      const repository = new Repository(database.db)
+      const folder = repository.addSourceFolder("C:\\videos", "C:\\videos")
+      const media = repository.upsertMedia({
+        sourceFolderId: folder.id,
+        relativePath: "summary.mp4",
+        canonicalPath: "C:\\videos\\summary.mp4",
+        displayName: "summary.mp4",
+        sizeBytes: 100,
+        modifiedAtMs: 100,
+        quickFingerprint: "summary-fixture"
+      })
+      repository.replaceChunks(media.id, "chunk-v1", [{
+        startMs: 10_000,
+        endMs: 20_000,
+        transcript: "The player changes strategy."
+      }])
+      const chunk = repository.getChunksForEmbedding(media.id)[0]!
+      repository.applyEnrichments(media.id, [{
+        chunkId: chunk.id,
+        summary: "A defensive strategy change stabilizes the attempt.",
+        entities: [{ name: "Kalphite King", type: "boss" }],
+        events: [{ type: "strategy_change", subject: "player", object: null, confidence: 0.96 }],
+        aliases: ["KK"],
+        searchPhrases: ["defensive strategy"],
+        confidence: 0.95
+      }], "fixture-v1")
+
+      expect(repository.getMediaSummaries(media.id)).toEqual([{
+        startMs: 10_000,
+        endMs: 20_000,
+        summary: "A defensive strategy change stabilizes the attempt.",
+        entities: ["Kalphite King"],
+        events: ["strategy_change"]
+      }])
     } finally {
       database.close()
     }

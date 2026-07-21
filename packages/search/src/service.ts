@@ -4,6 +4,8 @@ export interface LexicalSearchRecord {
   chunkId: number
   mediaId: string
   title: string
+  relativePath: string
+  createdAtMs: number
   startMs: number
   endMs: number
   transcript: string
@@ -16,9 +18,21 @@ export interface LexicalSearchRecord {
 }
 
 export interface SearchRepository {
-  lexicalSearch(query: string, includeMissing: boolean, limit: number): LexicalSearchRecord[]
+  lexicalSearch(
+    query: string,
+    includeMissing: boolean,
+    limit: number,
+    createdAfterMs?: number,
+    createdBeforeMs?: number
+  ): LexicalSearchRecord[]
   countSearchChunks(): number
-  semanticSearch?(embedding: Float32Array, includeMissing: boolean, limit: number): LexicalSearchRecord[]
+  semanticSearch?(
+    embedding: Float32Array,
+    includeMissing: boolean,
+    limit: number,
+    createdAfterMs?: number,
+    createdBeforeMs?: number
+  ): LexicalSearchRecord[]
 }
 
 export class SearchService {
@@ -27,9 +41,21 @@ export class SearchService {
   search(request: SearchRequest, semanticEmbedding?: Float32Array): SearchResponse {
     const startedAt = performance.now()
     const { toFtsQuery } = requireQueryHelpers()
-    const lexical = this.repository.lexicalSearch(toFtsQuery(request.query), request.includeMissing, 100)
-    const semantic = semanticEmbedding && this.repository.semanticSearch
-      ? this.repository.semanticSearch(semanticEmbedding, request.includeMissing, 100)
+    const lexical = request.mode === "semantic" ? [] : this.repository.lexicalSearch(
+      toFtsQuery(request.query),
+      request.includeMissing,
+      100,
+      request.createdAfterMs,
+      request.createdBeforeMs
+    )
+    const semantic = request.mode !== "keyword" && semanticEmbedding && this.repository.semanticSearch
+      ? this.repository.semanticSearch(
+          semanticEmbedding,
+          request.includeMissing,
+          100,
+          request.createdAfterMs,
+          request.createdBeforeMs
+        )
       : []
     const queryLower = request.query.toLocaleLowerCase("en-US")
 
@@ -60,6 +86,8 @@ export class SearchService {
       return {
         mediaId: row.mediaId,
         title: row.title,
+        relativePath: row.relativePath,
+        createdAtMs: row.createdAtMs,
         startMs: row.startMs,
         endMs: row.endMs,
         transcriptExcerpt: excerpt(row.transcript, request.query),

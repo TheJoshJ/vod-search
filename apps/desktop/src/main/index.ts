@@ -37,7 +37,7 @@ app.whenReady().then(async () => {
   await indexer.start(
     join(app.getPath("userData"), "index", "vod-search.db"),
     join(app.getPath("userData"), "models"),
-    process.resourcesPath
+    app.isPackaged ? process.resourcesPath : join(app.getAppPath(), "..", "..", "resources")
   )
   registerProtocol()
   registerIpc()
@@ -65,7 +65,6 @@ function createWindow(): void {
     height: 820,
     minWidth: 960,
     minHeight: 640,
-    backgroundColor: "#0d1117",
     show: false,
     title: "VOD Search",
     webPreferences: {
@@ -117,6 +116,8 @@ function registerIpc(): void {
     const path = await indexer.request<string | null>("media:path", mediaId)
     return { url: path ? `vod-media://asset/${encodeURIComponent(mediaId)}` : "", available: Boolean(path) }
   })
+  ipcMain.handle(ipcChannels.mediaDetail, (_event, mediaId) =>
+    indexer.request("media:detail", String(mediaId)))
 }
 
 function registerProtocol(): void {

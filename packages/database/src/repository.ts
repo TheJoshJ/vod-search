@@ -6,6 +6,7 @@ import type {
   JobStage,
   LibraryStats,
   MediaAsset,
+  MediaSummarySection,
   ResourceMode,
   SourceFolder,
   TranscriptSegment,
@@ -29,6 +30,7 @@ interface MediaRow {
   relative_path: string
   duration_ms: number | null
   size_bytes: number
+  created_at_ms: number
   modified_at_ms: number
   quick_fingerprint: string
   availability: "available" | "missing"
@@ -55,6 +57,7 @@ export interface UpsertMediaInput {
   canonicalPath: string
   displayName: string
   sizeBytes: number
+  createdAtMs?: number
   modifiedAtMs: number
   quickFingerprint: string
   durationMs?: number | null
@@ -91,6 +94,8 @@ export interface LexicalHitRow {
   chunkId: number
   mediaId: string
   title: string
+  relativePath: string
+  createdAtMs: number
   startMs: number
   endMs: number
   transcript: string
@@ -166,16 +171,17 @@ export class Repository {
     this.db.prepare(
       `INSERT INTO media_assets(
         id, source_folder_id, relative_path, canonical_path, display_name,
-        size_bytes, modified_at_ms, quick_fingerprint, duration_ms,
+        size_bytes, created_at_ms, modified_at_ms, quick_fingerprint, duration_ms,
         container, video_codec, audio_codec, availability,
         highest_completed_stage, discovered_at_ms, updated_at_ms
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', 'discovered', ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', 'discovered', ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         source_folder_id = excluded.source_folder_id,
         relative_path = excluded.relative_path,
         canonical_path = excluded.canonical_path,
         display_name = excluded.display_name,
         size_bytes = excluded.size_bytes,
+        created_at_ms = excluded.created_at_ms,
         modified_at_ms = excluded.modified_at_ms,
         quick_fingerprint = excluded.quick_fingerprint,
         duration_ms = COALESCE(excluded.duration_ms, media_assets.duration_ms),
@@ -195,6 +201,7 @@ export class Repository {
       input.canonicalPath,
       input.displayName,
       input.sizeBytes,
+      input.createdAtMs ?? input.modifiedAtMs,
       input.modifiedAtMs,
       input.quickFingerprint,
       input.durationMs ?? null,
@@ -253,7 +260,7 @@ export class Repository {
   getMedia(id: string): MediaAsset {
     const row = this.db.prepare(
       `SELECT id, source_folder_id, display_name, relative_path, duration_ms,
-              size_bytes, modified_at_ms, quick_fingerprint, availability,
+              size_bytes, created_at_ms, modified_at_ms, quick_fingerprint, availability,
               highest_completed_stage
        FROM media_assets WHERE id = ?`
     ).get(id) as MediaRow | undefined
@@ -275,10 +282,10 @@ export class Repository {
       : [input.limit, input.offset]
     const rows = this.db.prepare(
       `SELECT id, source_folder_id, display_name, relative_path, duration_ms,
-              size_bytes, modified_at_ms, quick_fingerprint, availability,
+              size_bytes, created_at_ms, modified_at_ms, quick_fingerprint, availability,
               highest_completed_stage
        FROM media_assets ${condition}
-       ORDER BY modified_at_ms DESC
+       ORDER BY created_at_ms DESC, modified_at_ms DESC
        LIMIT ? OFFSET ?`
     ).all(...params) as MediaRow[]
     return rows.map(mapMedia)
@@ -461,6 +468,28 @@ export class Repository {
     })
   }
 
+  getMediaSummaries(mediaId: string): MediaSummarySection[] {
+    const rows = this.db.prepare(
+      `SELECT start_ms, end_ms, summary, entities_json, events_json
+       FROM search_chunks
+       WHERE media_id = ? AND summary IS NOT NULL AND TRIM(summary) <> ''
+       ORDER BY start_ms`
+    ).all(mediaId) as Array<{
+      start_ms: number
+      end_ms: number
+      summary: string
+      entities_json: string
+      events_json: string
+    }>
+    return rows.map((row) => ({
+      startMs: row.start_ms,
+      endMs: row.end_ms,
+      summary: row.summary,
+      entities: jsonStringField(row.entities_json, "name"),
+      events: jsonStringField(row.events_json, "type")
+    }))
+  }
+
   applyEnrichments(mediaId: string, enrichments: EnrichedChunk[], version: string): void {
     const update = this.db.prepare(
       `UPDATE search_chunks SET summary = ?, entities_json = ?, events_json = ?, aliases_json = ?,
@@ -516,10 +545,19 @@ export class Repository {
     return this.getJob(existing.id)
   }
 
-  semanticSearch(embedding: Float32Array, includeMissing: boolean, limit: number): LexicalHitRow[] {
+  semanticSearch(
+    embedding: Float32Array,
+    includeMissing: boolean,
+    limit: number,
+    createdAfterMs?: number,
+    createdBeforeMs?: number
+  ): LexicalHitRow[] {
+    const after = createdAfterMs ?? null
+    const before = createdBeforeMs ?? null
     try {
       const rows = this.db.prepare(
         `SELECT sc.id AS chunk_id, sc.media_id, ma.display_name AS title,
+                ma.relative_path, ma.created_at_ms,
                 sc.start_ms, sc.end_ms, sc.transcript, sc.summary,
                 sc.entities_json, sc.events_json, sc.aliases_json,
                 ma.availability, vec.distance AS rank
@@ -528,13 +566,20 @@ export class Repository {
          JOIN media_assets ma ON ma.id = sc.media_id
          WHERE vec.embedding MATCH ? AND k = ?
            AND (? = 1 OR ma.availability = 'available')
+           AND (? IS NULL OR ma.created_at_ms >= ?)
+           AND (? IS NULL OR ma.created_at_ms < ?)
          ORDER BY vec.distance`
       ).all(
         Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength),
         limit,
-        includeMissing ? 1 : 0
+        includeMissing ? 1 : 0,
+        after,
+        after,
+        before,
+        before
       ) as Array<{
-        chunk_id: number; media_id: string; title: string; start_ms: number; end_ms: number;
+        chunk_id: number; media_id: string; title: string; relative_path: string; created_at_ms: number;
+        start_ms: number; end_ms: number;
         transcript: string; summary: string | null; entities_json: string; events_json: string;
         aliases_json: string; availability: "available" | "missing"; rank: number
       }>
@@ -542,6 +587,8 @@ export class Repository {
         chunkId: row.chunk_id,
         mediaId: row.media_id,
         title: row.title,
+        relativePath: row.relative_path,
+        createdAtMs: row.created_at_ms,
         startMs: row.start_ms,
         endMs: row.end_ms,
         transcript: row.transcript,
@@ -557,9 +604,18 @@ export class Repository {
     }
   }
 
-  lexicalSearch(ftsQuery: string, includeMissing: boolean, limit: number): LexicalHitRow[] {
+  lexicalSearch(
+    ftsQuery: string,
+    includeMissing: boolean,
+    limit: number,
+    createdAfterMs?: number,
+    createdBeforeMs?: number
+  ): LexicalHitRow[] {
+    const after = createdAfterMs ?? null
+    const before = createdBeforeMs ?? null
     const rows = this.db.prepare(
       `SELECT sc.id AS chunk_id, sc.media_id, ma.display_name AS title,
+              ma.relative_path, ma.created_at_ms,
               sc.start_ms, sc.end_ms, sc.transcript, sc.summary,
               sc.entities_json, sc.events_json, sc.aliases_json,
               ma.availability, bm25(search_chunks_fts, 0.0, 3.0, 2.0, 1.5, 2.0) AS rank
@@ -568,10 +624,13 @@ export class Repository {
        JOIN media_assets ma ON ma.id = sc.media_id
        WHERE search_chunks_fts MATCH ?
          AND (? = 1 OR ma.availability = 'available')
+         AND (? IS NULL OR ma.created_at_ms >= ?)
+         AND (? IS NULL OR ma.created_at_ms < ?)
        ORDER BY rank
        LIMIT ?`
-    ).all(ftsQuery, includeMissing ? 1 : 0, limit) as Array<{
-      chunk_id: number; media_id: string; title: string; start_ms: number; end_ms: number;
+    ).all(ftsQuery, includeMissing ? 1 : 0, after, after, before, before, limit) as Array<{
+      chunk_id: number; media_id: string; title: string; relative_path: string; created_at_ms: number;
+      start_ms: number; end_ms: number;
       transcript: string; summary: string | null; entities_json: string; events_json: string;
       aliases_json: string; availability: "available" | "missing"; rank: number
     }>
@@ -579,6 +638,8 @@ export class Repository {
       chunkId: row.chunk_id,
       mediaId: row.media_id,
       title: row.title,
+      relativePath: row.relative_path,
+      createdAtMs: row.created_at_ms,
       startMs: row.start_ms,
       endMs: row.end_ms,
       transcript: row.transcript,
@@ -765,10 +826,26 @@ function mapMedia(row: MediaRow): MediaAsset {
     relativePath: row.relative_path,
     durationMs: row.duration_ms,
     sizeBytes: row.size_bytes,
+    createdAtMs: row.created_at_ms,
     modifiedAtMs: row.modified_at_ms,
     quickFingerprint: row.quick_fingerprint,
     availability: row.availability,
     highestCompletedStage: row.highest_completed_stage
+  }
+}
+
+function jsonStringField(json: string, field: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(json)
+    if (!Array.isArray(parsed)) return []
+    return parsed.flatMap((item): string[] => {
+      if (typeof item === "string") return [item]
+      if (!item || typeof item !== "object") return []
+      const value = (item as Record<string, unknown>)[field]
+      return typeof value === "string" ? [value] : []
+    })
+  } catch {
+    return []
   }
 }
 

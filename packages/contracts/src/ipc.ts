@@ -3,6 +3,7 @@ import {
   jobSchema,
   libraryStatsSchema,
   mediaAssetSchema,
+  mediaDetailSchema,
   modelInstallationSchema,
   resourceModeSchema,
   sourceFolderSchema
@@ -24,6 +25,7 @@ export const ipcChannels = {
   modelsDownload: "models:download",
   modelsCancelDownload: "models:cancel-download",
   mediaPlaybackSource: "media:playback-source",
+  mediaDetail: "media:detail",
   eventLibraryChanged: "event:library-changed",
   eventJobsChanged: "event:jobs-changed",
   eventModelsChanged: "event:models-changed"
@@ -65,6 +67,7 @@ export interface VodSearchApi {
   }
   media: {
     getPlaybackSource(mediaId: string): Promise<z.infer<typeof mediaPlaybackResponseSchema>>
+    getDetail(mediaId: string): Promise<z.infer<typeof mediaDetailSchema>>
   }
   events: {
     onLibraryChanged(listener: () => void): () => void
