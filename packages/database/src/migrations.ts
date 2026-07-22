@@ -170,6 +170,51 @@ const migrations: Migration[] = [
     sql: `
       ALTER TABLE source_folders ADD COLUMN publish_shared_metadata INTEGER NOT NULL DEFAULT 0;
     `
+  },
+  {
+    version: 4,
+    name: "speaker_diarization",
+    sql: `
+      CREATE TABLE speaker_profiles (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+        embedding BLOB,
+        sample_count INTEGER NOT NULL DEFAULT 0,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL
+      );
+
+      CREATE TABLE speaker_diarization_runs (
+        media_id TEXT PRIMARY KEY REFERENCES media_assets(id) ON DELETE CASCADE,
+        version TEXT NOT NULL,
+        completed_at_ms INTEGER NOT NULL
+      );
+
+      CREATE TABLE media_speakers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        media_id TEXT NOT NULL REFERENCES media_assets(id) ON DELETE CASCADE,
+        diarization_label TEXT NOT NULL,
+        profile_id TEXT REFERENCES speaker_profiles(id) ON DELETE SET NULL,
+        embedding BLOB NOT NULL,
+        speech_ms INTEGER NOT NULL DEFAULT 0,
+        turn_count INTEGER NOT NULL DEFAULT 0,
+        first_start_ms INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(media_id, diarization_label)
+      );
+
+      CREATE INDEX media_speakers_media_idx ON media_speakers(media_id);
+      CREATE INDEX media_speakers_profile_idx ON media_speakers(profile_id);
+
+      CREATE TABLE speaker_turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        media_id TEXT NOT NULL REFERENCES media_assets(id) ON DELETE CASCADE,
+        media_speaker_id INTEGER NOT NULL REFERENCES media_speakers(id) ON DELETE CASCADE,
+        start_ms INTEGER NOT NULL,
+        end_ms INTEGER NOT NULL
+      );
+
+      CREATE INDEX speaker_turns_media_time_idx ON speaker_turns(media_id, start_ms, end_ms);
+    `
   }
 ]
 

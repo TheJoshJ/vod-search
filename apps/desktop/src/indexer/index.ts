@@ -1,6 +1,7 @@
 import { availableParallelism } from "node:os"
 import { dirname, extname, join, resolve } from "node:path"
 import { access, mkdir } from "node:fs/promises"
+import { fork } from "node:child_process"
 import { openDatabase, Repository } from "@vod-search/database"
 import {
   addFolderRequestSchema,
@@ -9,14 +10,20 @@ import {
   listMediaRequestSchema,
   processingScheduleSchema,
   resourceModeSchema,
+  roughCutGenerateRequestSchema,
   retryJobRequestSchema,
   searchRequestSchema,
   setFolderSharingRequestSchema,
+  speakerAssignProfileRequestSchema,
+  speakerCreateProfileRequestSchema,
+  speakerRenameProfileRequestSchema,
+  type SpeakerAnalysis,
   type ProcessingSchedule,
   type TranscriptSegment,
   type TranscriptTopic
 } from "@vod-search/contracts"
 import { chunkTranscript, parseSubtitle, SearchService } from "@vod-search/search"
+import { buildRoughCutPlan, type RoughCutSource } from "@vod-search/rough-cut"
 import {
   BGE_EMBEDDING_VERSION,
   BgeEmbedder,
@@ -25,9 +32,15 @@ import {
   CodexEnricher,
   extractEmbeddedSubtitle,
   ModelManager,
+  SHERPA_ENGINE_VERSION,
+  SherpaManager,
+  getSherpaNativeLibraryPath,
+  type SherpaOptions,
+  type SherpaResult,
   probeMedia,
   transcribeWithWhisper
 } from "@vod-search/inference"
+import type { RoughCutCandidateInput } from "@vod-search/inference"
 import { scanSourceFolder } from "./scanner.js"
 import { publishSharedMetadata } from "./shared-metadata.js"
 import { watch, type FSWatcher } from "chokidar"
@@ -49,6 +62,9 @@ const modelsPathFromEnvironment = process.env.VOD_SEARCH_MODELS_PATH
 if (!modelsPathFromEnvironment) throw new Error("VOD_SEARCH_MODELS_PATH is required")
 const modelsPath: string = modelsPathFromEnvironment
 const models = new ModelManager(modelsPath, undefined, notifyModelsChanged)
+const resourcesPath = process.env.VOD_SEARCH_RESOURCES_PATH
+if (!resourcesPath) throw new Error("VOD_SEARCH_RESOURCES_PATH is required")
+const sherpa = new SherpaManager(resourcesPath)
 repository.recoverRunningJobs()
 repository.cancelTranscriptionsBlockedByFailedProbe()
 let embedder: BgeEmbedder | null = null
@@ -136,6 +152,7 @@ async function dispatch(method: string, payload: unknown): Promise<unknown> {
       const queryEmbedding = activeEmbedder ? await activeEmbedder.embedQuery(input.query) : undefined
       return search.search(input, queryEmbedding)
     }
+    case "rough-cut:generate": return generateRoughCut(payload)
     case "jobs:list": return repository.listJobs()
     case "jobs:retry": repository.retryJob(retryJobRequestSchema.parse({ jobId: payload }).jobId); notifyJobsChanged(); return undefined
     case "jobs:pause-all": repository.pauseAllJobs(); notifyJobsChanged(); return undefined
@@ -150,6 +167,26 @@ async function dispatch(method: string, payload: unknown): Promise<unknown> {
     case "models:list": return models.list()
     case "models:download": await models.install(String(payload)); return undefined
     case "models:cancel-download": models.cancel(String(payload)); return undefined
+    case "speakers:status": return sherpa.status()
+    case "speakers:review-queue": return repository.getSpeakerReviewQueue()
+    case "speakers:create-profile": {
+      const input = speakerCreateProfileRequestSchema.parse(payload)
+      const profile = repository.createSpeakerProfile(input.mediaSpeakerId, input.name)
+      notifyLibraryChanged()
+      return profile
+    }
+    case "speakers:assign-profile": {
+      const input = speakerAssignProfileRequestSchema.parse(payload)
+      repository.assignMediaSpeakerProfile(input.mediaSpeakerId, input.profileId)
+      notifyLibraryChanged()
+      return undefined
+    }
+    case "speakers:rename-profile": {
+      const input = speakerRenameProfileRequestSchema.parse(payload)
+      const profile = repository.renameSpeakerProfile(input.profileId, input.name)
+      notifyLibraryChanged()
+      return profile
+    }
     case "codex:refresh": {
       enricher = null
       nextEnricherAttemptAt = 0
@@ -162,11 +199,110 @@ async function dispatch(method: string, payload: unknown): Promise<unknown> {
       return {
         media: repository.getMedia(mediaId),
         transcript: repository.getTranscript(mediaId),
-        summaries: repository.getMediaSummaries(mediaId)
+        summaries: repository.getMediaSummaries(mediaId),
+        speakers: repository.getMediaSpeakers(mediaId),
+        speakerProfiles: repository.listSpeakerProfiles(),
+        speakerAnalysis: await getSpeakerAnalysis(mediaId)
       }
     }
     default: throw new Error(`Unknown indexer method: ${method}`)
   }
+}
+
+async function generateRoughCut(payload: unknown) {
+  const request = roughCutGenerateRequestSchema.parse(payload)
+  const activeEmbedder = await getEmbedder()
+  if (!activeEmbedder) throw new Error("Install the semantic search model before generating a rough cut")
+  const activeEnricher = await getEnricher()
+  if (!activeEnricher) throw new Error("Sign in to Codex before generating a rough cut")
+
+  const sources: RoughCutSource[] = request.mediaIds.map((mediaId) => {
+    const media = repository.getMedia(mediaId)
+    const path = repository.getMediaPath(mediaId)
+    if (!path || media.availability !== "available") throw new Error(`${media.displayName} is offline or unavailable`)
+    if (!media.durationMs || media.durationMs <= 0) throw new Error(`${media.displayName} does not have a usable duration`)
+    const segments = repository.getTranscript(mediaId).filter((segment) => segment.text.trim())
+    if (segments.length === 0) throw new Error(`${media.displayName} does not have an indexed transcript`)
+    return {
+      mediaId,
+      path,
+      title: media.displayName,
+      durationMs: media.durationMs,
+      segments: segments.map((segment) => ({
+        id: segment.id,
+        startMs: segment.startMs,
+        endMs: segment.endMs,
+        text: segment.text.trim().replace(/\s+/g, " ")
+      }))
+    }
+  })
+
+  const sourceById = new Map(sources.map((source) => [source.mediaId, source]))
+  const candidates: RoughCutCandidateInput[] = []
+  const seenWindows = new Set<string>()
+  for (const query of extractRoughCutQueries(request.prompt)) {
+    const queryEmbedding = await activeEmbedder.embedQuery(query)
+    const response = search.search({
+      query,
+      mode: "hybrid",
+      mediaIds: request.mediaIds,
+      includeMissing: false,
+      limit: 15
+    }, queryEmbedding)
+    for (const hit of response.hits) {
+      if (candidates.length >= 120) break
+      const source = sourceById.get(hit.mediaId)
+      if (!source) continue
+      const windowStart = Math.max(0, hit.startMs - 30_000)
+      const windowEnd = Math.min(source.durationMs, hit.endMs + 30_000)
+      const evidence = source.segments.filter((segment) => segment.endMs >= windowStart && segment.startMs <= windowEnd)
+      if (evidence.length === 0) continue
+      const key = `${hit.mediaId}:${evidence[0]!.id}:${evidence.at(-1)!.id}`
+      if (seenWindows.has(key)) continue
+      seenWindows.add(key)
+      candidates.push({
+        candidateId: `candidate-${candidates.length + 1}`,
+        mediaId: hit.mediaId,
+        title: hit.title,
+        requestedBeat: query,
+        summary: hit.summary,
+        searchScore: hit.score,
+        segments: evidence.map((segment) => ({ segmentId: segment.id, text: segment.text }))
+      })
+    }
+  }
+  if (candidates.length === 0) {
+    throw new Error("No transcript moments in the selected videos matched this brief. Try more concrete spoken phrases or select additional videos.")
+  }
+
+  const selections = await activeEnricher.planRoughCut(request.prompt, candidates)
+  const candidateById = new Map(candidates.map((candidate) => [candidate.candidateId, candidate]))
+  const matches = selections.map((selection) => {
+    const candidate = candidateById.get(selection.candidateId)
+    if (!candidate) throw new Error(`Codex selected an unknown candidate: ${selection.candidateId}`)
+    return {
+      mediaId: candidate.mediaId,
+      startSegmentId: selection.startSegmentId,
+      endSegmentId: selection.endSegmentId,
+      requestedText: selection.requestedText,
+      matchRationale: selection.matchRationale
+    }
+  })
+  if (matches.length === 0) {
+    throw new Error("The selected videos did not contain enough transcript evidence for this rough-cut brief")
+  }
+  return buildRoughCutPlan({ request, sources, matches })
+}
+
+function extractRoughCutQueries(prompt: string): string[] {
+  const normalized = prompt.trim().replace(/\s+/g, " ")
+  const beats = prompt
+    .split(/\r?\n+|(?<=[.!?;])\s+/)
+    .map((value) => value.trim().replace(/^[-*\d.)\s]+/, ""))
+    .filter((value) => value.length >= 4)
+    .map((value) => value.slice(0, 500))
+  const ordered = normalized.length <= 500 ? [normalized, ...beats] : beats
+  return [...new Set(ordered)].slice(0, 8)
 }
 
 function notifyLibraryChanged(): void {
@@ -209,10 +345,13 @@ async function runSchedulerTick(): Promise<void> {
     const ffprobePath = await findRuntimeExecutable("ffprobe")
     const ffmpegPath = await findRuntimeExecutable("ffmpeg")
     const transcriptionRuntime = await getTranscriptionRuntime(installations, ffmpegPath)
+    const diarizationRuntime = ffmpegPath ? await sherpa.runtime() : null
     const hasEmbeddingModel = installations.some((model) =>
       model.modelId === "bge-small-en-v1.5" && model.status === "installed")
     const activeEnricher = await getEnricher()
     let reconciledJobs = repository.cancelTranscriptionsBlockedByFailedProbe()
+    if (diarizationRuntime) reconciledJobs += repository.ensureDiarizationJobs(SHERPA_ENGINE_VERSION)
+    else reconciledJobs += repository.cancelPendingJobsByStage("diarize")
     if (activeEnricher) reconciledJobs += repository.ensureEnrichmentJobs(CODEX_ENRICHMENT_VERSION)
     else reconciledJobs += repository.cancelPendingJobsByStage("enrich")
     if (hasEmbeddingModel) {
@@ -226,6 +365,7 @@ async function runSchedulerTick(): Promise<void> {
     const availableStages = [
       ...(ffprobePath ? ["probe" as const] : []),
       ...(transcriptionRuntime ? ["transcribe" as const] : []),
+      ...(diarizationRuntime ? ["diarize" as const] : []),
       ...(activeEnricher ? ["enrich" as const] : []),
       ...(hasEmbeddingModel ? ["embed" as const] : [])
     ].filter((stage) => isJobStageAllowed(processingSchedule, stage, now))
@@ -238,6 +378,8 @@ async function runSchedulerTick(): Promise<void> {
         await runProbeJob(job.id, job.mediaId, ffprobePath, ffmpegPath)
       } else if (job.stage === "transcribe" && transcriptionRuntime) {
         await runTranscriptionJob(job.id, job.mediaId, transcriptionRuntime)
+      } else if (job.stage === "diarize" && diarizationRuntime && ffmpegPath) {
+        await runDiarizationJob(job.id, job.mediaId, ffmpegPath, diarizationRuntime)
       } else if (job.stage === "embed") {
         const activeEmbedder = await getEmbedder()
         if (!activeEmbedder) throw new Error("The embedding model is not installed")
@@ -256,6 +398,19 @@ async function runSchedulerTick(): Promise<void> {
     schedulerRunning = false
     notifyJobsChanged()
   }
+}
+
+async function getSpeakerAnalysis(mediaId: string): Promise<SpeakerAnalysis> {
+  if (repository.getDiarizationVersion(mediaId) === SHERPA_ENGINE_VERSION) {
+    return { state: "ready", error: null }
+  }
+  const job = repository.getMediaJob(mediaId, "diarize")
+  if (job?.status === "running") return { state: "running", error: null }
+  if (job?.status === "failed") return { state: "failed", error: job.error }
+  if (job?.status === "queued" || job?.status === "paused") return { state: "queued", error: null }
+  const engine = await sherpa.status()
+  if (engine.state === "ready") return { state: "queued", error: null }
+  return { state: "setup-required", error: engine.error }
 }
 
 interface TranscriptionRuntime {
@@ -379,7 +534,7 @@ async function runTranscriptionJob(
     whisperPath: runtime.whisperPath,
     modelPath: runtime.modelPath,
     mediaPath,
-    threads: transcriptionThreads(repository.getResourceMode()),
+    threads: diarizationThreads(repository.getResourceMode()),
     onProgress: (progress) => {
       repository.updateJob(jobId, { progress: Math.max(0.02, Math.min(0.95, progress)) })
       notifyJobsChanged()
@@ -402,6 +557,70 @@ async function runTranscriptionJob(
   notifyLibraryChanged()
 }
 
+async function runDiarizationJob(
+  jobId: string,
+  mediaId: string,
+  ffmpegPath: string,
+  runtime: NonNullable<Awaited<ReturnType<SherpaManager["runtime"]>>>
+): Promise<void> {
+  const mediaPath = repository.getMediaPath(mediaId)
+  if (!mediaPath) throw new Error("The media file is no longer available")
+  const fingerprint = repository.getMedia(mediaId).quickFingerprint
+  const result = await runSherpaWorker({
+    ...runtime,
+    ffmpegPath,
+    mediaPath,
+    threads: transcriptionThreads(repository.getResourceMode()),
+    onProgress: (progress) => {
+      repository.updateJob(jobId, { progress: Math.max(0.02, Math.min(0.95, progress)) })
+      notifyJobsChanged()
+    }
+  })
+  if (repository.getMedia(mediaId).quickFingerprint !== fingerprint) {
+    repository.requeueJob(mediaId, "diarize")
+    return
+  }
+  repository.replaceSpeakerDiarization(mediaId, SHERPA_ENGINE_VERSION, result.speakers, result.turns)
+  repository.updateJob(jobId, { status: "succeeded", progress: 1, error: null })
+  notifyLibraryChanged()
+}
+
+function runSherpaWorker(options: Omit<SherpaOptions, "signal">): Promise<SherpaResult> {
+  const { onProgress, ...workerData } = options
+  return new Promise((resolve, reject) => {
+    const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH"
+    const worker = fork(join(__dirname, "sherpa-worker.js"), [], {
+      execPath: process.execPath,
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: "1",
+        [pathKey]: `${getSherpaNativeLibraryPath()};${process.env[pathKey] ?? ""}`
+      },
+      serialization: "advanced",
+      stdio: ["ignore", "ignore", "pipe", "ipc"]
+    })
+    let settled = false
+    let stderr = ""
+    const finish = (callback: () => void): void => {
+      if (settled) return
+      settled = true
+      callback()
+    }
+    worker.stderr?.setEncoding("utf8")
+    worker.stderr?.on("data", (chunk: string) => { stderr += chunk })
+    worker.on("message", (message: { type: string; progress?: number; result?: SherpaResult; error?: string }) => {
+      if (message.type === "progress" && message.progress !== undefined) onProgress?.(message.progress)
+      else if (message.type === "result" && message.result) finish(() => resolve(message.result!))
+      else if (message.type === "error") finish(() => reject(new Error(message.error ?? "Sherpa diarization failed")))
+    })
+    worker.on("error", (error) => finish(() => reject(error)))
+    worker.on("exit", (code) => {
+      if (code !== 0) finish(() => reject(new Error(`Sherpa diarization process exited with code ${code}: ${stderr.slice(-1_000)}`)))
+    })
+    worker.send(workerData)
+  })
+}
+
 function preferredSubtitle(
   subtitles: Array<{ streamIndex: number; language: string | null; title: string | null }>
 ): { streamIndex: number; language: string | null; title: string | null } {
@@ -413,6 +632,13 @@ function transcriptionThreads(mode: "low" | "normal" | "high"): number {
   if (mode === "low") return Math.min(2, cores)
   if (mode === "high") return Math.max(1, cores - 1)
   return Math.max(1, Math.min(6, Math.ceil(cores / 2)))
+}
+
+function diarizationThreads(mode: "low" | "normal" | "high"): number {
+  const cores = Math.max(1, availableParallelism())
+  if (mode === "low") return 1
+  if (mode === "high") return Math.min(4, cores)
+  return Math.min(2, cores)
 }
 
 async function runEmbeddingJob(jobId: string, mediaId: string, activeEmbedder: BgeEmbedder): Promise<void> {

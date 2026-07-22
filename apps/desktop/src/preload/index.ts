@@ -29,6 +29,10 @@ const api: VodSearchApi = {
   search: {
     query: (input: SearchRequest) => ipcRenderer.invoke(ipcChannels.searchQuery, input)
   },
+  roughCut: {
+    generate: (input) => ipcRenderer.invoke(ipcChannels.roughCutGenerate, input),
+    export: (plan) => ipcRenderer.invoke(ipcChannels.roughCutExport, plan)
+  },
   jobs: {
     list: () => ipcRenderer.invoke(ipcChannels.jobsList),
     retry: (jobId) => ipcRenderer.invoke(ipcChannels.jobsRetry, { jobId }),
@@ -42,6 +46,16 @@ const api: VodSearchApi = {
     list: () => ipcRenderer.invoke(ipcChannels.modelsList),
     download: (modelId) => ipcRenderer.invoke(ipcChannels.modelsDownload, modelId),
     cancelDownload: (modelId) => ipcRenderer.invoke(ipcChannels.modelsCancelDownload, modelId)
+  },
+  speakers: {
+    status: () => ipcRenderer.invoke(ipcChannels.speakersStatus),
+    reviewQueue: () => ipcRenderer.invoke(ipcChannels.speakersReviewQueue),
+    createProfile: (mediaSpeakerId, name) =>
+      ipcRenderer.invoke(ipcChannels.speakersCreateProfile, { mediaSpeakerId, name }),
+    assignProfile: (mediaSpeakerId, profileId) =>
+      ipcRenderer.invoke(ipcChannels.speakersAssignProfile, { mediaSpeakerId, profileId }),
+    renameProfile: (profileId, name) =>
+      ipcRenderer.invoke(ipcChannels.speakersRenameProfile, { profileId, name })
   },
   codex: {
     status: () => ipcRenderer.invoke(ipcChannels.codexStatus),

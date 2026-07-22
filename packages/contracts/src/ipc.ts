@@ -7,9 +7,17 @@ import {
   mediaDetailSchema,
   modelInstallationSchema,
   resourceModeSchema,
+  speakerEngineStatusSchema,
+  speakerProfileSchema,
+  speakerReviewQueueSchema,
   sourceFolderSchema
 } from "./domain.js"
 import { searchRequestSchema, searchResponseSchema } from "./search.js"
+import {
+  roughCutExportResponseSchema,
+  roughCutGenerateRequestSchema,
+  roughCutPlanSchema
+} from "./rough-cut.js"
 import { processingScheduleSchema } from "./schedule.js"
 
 export const ipcChannels = {
@@ -23,6 +31,8 @@ export const ipcChannels = {
   libraryRevealFolder: "library:reveal-folder",
   libraryRemoveFolder: "library:remove-folder",
   searchQuery: "search:query",
+  roughCutGenerate: "rough-cut:generate",
+  roughCutExport: "rough-cut:export",
   jobsList: "jobs:list",
   jobsRetry: "jobs:retry",
   jobsPauseAll: "jobs:pause-all",
@@ -42,6 +52,11 @@ export const ipcChannels = {
   mediaOpenExternal: "media:open-external",
   mediaOpenExternalAt: "media:open-external-at",
   mediaExportClip: "media:export-clip",
+  speakersStatus: "speakers:status",
+  speakersReviewQueue: "speakers:review-queue",
+  speakersCreateProfile: "speakers:create-profile",
+  speakersAssignProfile: "speakers:assign-profile",
+  speakersRenameProfile: "speakers:rename-profile",
   eventLibraryChanged: "event:library-changed",
   eventJobsChanged: "event:jobs-changed",
   eventModelsChanged: "event:models-changed",
@@ -80,6 +95,18 @@ export const mediaExportClipRequestSchema = z.object({
   path: ["endMs"]
 })
 export const mediaExportClipResponseSchema = z.object({ path: z.string().nullable() })
+export const speakerCreateProfileRequestSchema = z.object({
+  mediaSpeakerId: z.number().int().positive(),
+  name: z.string().trim().min(1).max(80)
+})
+export const speakerAssignProfileRequestSchema = z.object({
+  mediaSpeakerId: z.number().int().positive(),
+  profileId: z.string().uuid().nullable()
+})
+export const speakerRenameProfileRequestSchema = z.object({
+  profileId: z.string().uuid(),
+  name: z.string().trim().min(1).max(80)
+})
 export const retryJobRequestSchema = z.object({ jobId: z.string().uuid() })
 export const mediaPlaybackResponseSchema = z.object({
   url: z.string(),
@@ -100,6 +127,10 @@ export interface VodSearchApi {
   }
   search: {
     query(input: z.input<typeof searchRequestSchema>): Promise<z.infer<typeof searchResponseSchema>>
+  }
+  roughCut: {
+    generate(input: z.input<typeof roughCutGenerateRequestSchema>): Promise<z.infer<typeof roughCutPlanSchema>>
+    export(plan: z.input<typeof roughCutPlanSchema>): Promise<z.infer<typeof roughCutExportResponseSchema>>
   }
   jobs: {
     list(): Promise<Array<z.infer<typeof jobSchema>>>
@@ -127,6 +158,13 @@ export interface VodSearchApi {
     openExternal(mediaId: string): Promise<z.infer<typeof mediaExternalOpenResponseSchema>>
     openExternalAt(mediaId: string, startMs: number): Promise<z.infer<typeof mediaExternalOpenResponseSchema>>
     exportClip(mediaId: string, startMs: number, endMs: number): Promise<z.infer<typeof mediaExportClipResponseSchema>>
+  }
+  speakers: {
+    status(): Promise<z.infer<typeof speakerEngineStatusSchema>>
+    reviewQueue(): Promise<z.infer<typeof speakerReviewQueueSchema>>
+    createProfile(mediaSpeakerId: number, name: string): Promise<z.infer<typeof speakerProfileSchema>>
+    assignProfile(mediaSpeakerId: number, profileId: string | null): Promise<void>
+    renameProfile(profileId: string, name: string): Promise<z.infer<typeof speakerProfileSchema>>
   }
   events: {
     onLibraryChanged(listener: () => void): () => void

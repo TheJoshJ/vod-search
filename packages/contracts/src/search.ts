@@ -9,6 +9,7 @@ export const searchRequestSchema = z.object({
   createdAfterMs: z.number().int().nonnegative().optional(),
   createdBeforeMs: z.number().int().nonnegative().optional(),
   sourceFolderIds: z.array(z.string()).max(100).optional(),
+  mediaIds: z.array(z.string().min(1)).max(100).optional(),
   includeMissing: z.boolean().default(false),
   limit: z.number().int().min(1).max(100).default(20)
 })

@@ -1,4 +1,5 @@
 import { basename, dirname, extname, join, resolve } from "node:path"
+import { writeFile } from "node:fs/promises"
 import {
   app,
   BrowserWindow,
@@ -16,11 +17,17 @@ import {
   mediaPlaybackRequestSchema,
   processingScheduleSchema,
   resourceModeSchema,
+  roughCutGenerateRequestSchema,
+  roughCutPlanSchema,
   retryJobRequestSchema,
   searchRequestSchema,
   setFolderSharingRequestSchema,
+  speakerAssignProfileRequestSchema,
+  speakerCreateProfileRequestSchema,
+  speakerRenameProfileRequestSchema,
   sourceFolderRequestSchema
 } from "@vod-search/contracts"
+import { buildPremiereXml, resequenceRoughCutPlan } from "@vod-search/rough-cut"
 import { IndexerClient } from "./indexer-client.js"
 import { CodexManager } from "./codex-manager.js"
 import { serveMediaFile } from "./media-protocol.js"
@@ -136,6 +143,36 @@ function registerIpc(): void {
   })
   ipcMain.handle(ipcChannels.searchQuery, (_event, payload) =>
     indexer.request("search:query", searchRequestSchema.parse(payload)))
+  ipcMain.handle(ipcChannels.roughCutGenerate, (_event, payload) =>
+    indexer.request("rough-cut:generate", roughCutGenerateRequestSchema.parse(payload), 10 * 60_000))
+  ipcMain.handle(ipcChannels.roughCutExport, async (_event, payload) => {
+    const requestedPlan = roughCutPlanSchema.parse(payload)
+    const currentPaths = new Map<string, string>()
+    for (const mediaId of new Set(requestedPlan.items.map((item) => item.mediaId))) {
+      currentPaths.set(mediaId, await requireMediaPath(mediaId))
+    }
+    const plan = resequenceRoughCutPlan({
+      ...requestedPlan,
+      items: requestedPlan.items.map((item) => ({ ...item, sourcePath: currentPaths.get(item.mediaId)! }))
+    })
+    const defaultPath = join(app.getPath("documents"), `${safeFileName(plan.title)}.xml`)
+    const result = await dialog.showSaveDialog({
+      title: "Export Premiere rough cut",
+      defaultPath,
+      filters: [{ name: "Final Cut Pro 7 XML", extensions: ["xml"] }]
+    })
+    if (result.canceled || !result.filePath) return { xmlPath: null, jsonPath: null }
+    const xmlPath = extname(result.filePath).toLocaleLowerCase("en-US") === ".xml"
+      ? result.filePath
+      : `${result.filePath}.xml`
+    const jsonPath = `${xmlPath.slice(0, -4)}.roughcut.json`
+    await Promise.all([
+      writeFile(xmlPath, buildPremiereXml(plan), "utf8"),
+      writeFile(jsonPath, `${JSON.stringify(plan, null, 2)}\n`, "utf8")
+    ])
+    shell.showItemInFolder(xmlPath)
+    return { xmlPath, jsonPath }
+  })
   ipcMain.handle(ipcChannels.jobsList, () => indexer.request("jobs:list"))
   ipcMain.handle(ipcChannels.jobsRetry, (_event, payload) => {
     const { jobId } = retryJobRequestSchema.parse(payload)
@@ -161,6 +198,14 @@ function registerIpc(): void {
     indexer.request("models:download", String(modelId), 24 * 60 * 60 * 1000))
   ipcMain.handle(ipcChannels.modelsCancelDownload, (_event, modelId) =>
     indexer.request("models:cancel-download", String(modelId)))
+  ipcMain.handle(ipcChannels.speakersStatus, () => indexer.request("speakers:status"))
+  ipcMain.handle(ipcChannels.speakersReviewQueue, () => indexer.request("speakers:review-queue"))
+  ipcMain.handle(ipcChannels.speakersCreateProfile, (_event, payload) =>
+    indexer.request("speakers:create-profile", speakerCreateProfileRequestSchema.parse(payload)))
+  ipcMain.handle(ipcChannels.speakersAssignProfile, (_event, payload) =>
+    indexer.request("speakers:assign-profile", speakerAssignProfileRequestSchema.parse(payload)))
+  ipcMain.handle(ipcChannels.speakersRenameProfile, (_event, payload) =>
+    indexer.request("speakers:rename-profile", speakerRenameProfileRequestSchema.parse(payload)))
   ipcMain.handle(ipcChannels.codexStatus, () => requireCodexManager().status())
   ipcMain.handle(ipcChannels.codexInstall, () => requireCodexManager().install())
   ipcMain.handle(ipcChannels.codexLogin, () => requireCodexManager().login())
@@ -225,6 +270,11 @@ function fileTimestamp(milliseconds: number): string {
   const minutes = Math.floor(totalSeconds % 3600 / 60)
   const seconds = totalSeconds % 60
   return [hours, minutes, seconds].map((part) => String(part).padStart(2, "0")).join("-")
+}
+
+function safeFileName(value: string): string {
+  const normalized = value.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-").replace(/\s+/g, " ").trim()
+  return (normalized || "VOD Search rough cut").slice(0, 120)
 }
 
 async function requireMediaPath(mediaId: string): Promise<string> {

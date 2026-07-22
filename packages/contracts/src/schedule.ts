@@ -24,7 +24,7 @@ export const defaultProcessingSchedule: ProcessingSchedule = {
 
 export function scheduleGroupForJobStage(stage: JobStage): ProcessingScheduleGroup | null {
   if (["probe", "subtitles", "chunk", "preview"].includes(stage)) return "ingestion"
-  if (stage === "transcribe") return "transcription"
+  if (stage === "transcribe" || stage === "diarize") return "transcription"
   if (stage === "enrich") return "summarization"
   return null
 }

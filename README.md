@@ -1,9 +1,9 @@
 # VOD Search
 
-VOD Search is a Windows-first video transcript search application. It indexes existing subtitles or local Whisper transcripts, asks Codex to identify and enrich natural transcript topics, and combines full-text and semantic search.
+VOD Search is a Windows-first video transcript search application. It indexes existing subtitles or local Whisper transcripts, identifies recurring speakers locally with bundled Sherpa ONNX models, asks Codex to enrich natural transcript topics, and combines full-text and semantic search.
 
 Source videos are referenced in place and are never modified. Transcripts, tags,
-embeddings, and the search index stay under the application's local data folder.
+speaker voice patterns, embeddings, and the search index stay under the application's local data folder.
 Only untimed transcript text is sent to OpenAI when Codex creates summaries and
 search metadata; video and audio files are never uploaded by VOD Search.
 
@@ -22,6 +22,10 @@ search metadata; video and audio files are never uploaded by VOD Search.
 - Recursively watches selected folders for common video and subtitle formats.
 - Prefers SRT, VTT, ASS, or embedded captions before transcribing audio.
 - Runs `whisper.cpp` locally with the free, open-source Whisper small.en model.
+- Runs Sherpa ONNX locally with bundled segmentation and voice-embedding models to separate speakers, match recurring voices
+  across clips, and annotate transcript lines with user-managed speaker names.
+- Provides a Speakers review queue for finding every unassigned voice across the
+  library, checking transcript evidence, and assigning or creating a speaker.
 - Creates an initial local full-text index, then replaces its fixed windows with Codex-selected topic sections.
 - Adds local BGE embeddings for meaning-based retrieval.
 - Reuses portable transcript and topic bundles from a source folder's `.vod-search`
@@ -57,20 +61,22 @@ extension.
 4. Search for spoken words, names, or descriptions such as “death to Kalphite
    King,” then open a result at its timestamp.
 
-Model downloads are pinned and SHA-256 verified. Whisper is about 465 MB, BGE
-is about 128 MB, and no local generative model is downloaded. Basic full-text
-search only requires Whisper (or existing subtitles); BGE supplies semantic
+The Whisper, BGE, and speaker-model downloads are pinned and SHA-256 verified.
+Whisper is about 465 MB, BGE is about 128 MB, and the bundled speaker models add
+about 33 MB. No local generative model is downloaded and speaker recognition
+does not require an account. Basic full-text search only requires Whisper (or existing subtitles); BGE supplies semantic
 similarity, while Codex supplies richer summaries and event metadata.
 
-The packaged Windows application includes Electron, FFmpeg, and `whisper.cpp`.
-End users do not need Node.js, Python, pnpm, or a terminal. The Settings page
+The packaged Windows application includes Electron, FFmpeg, `whisper.cpp`, the
+Sherpa ONNX native runtime, and its speaker models. End users do not need Node.js,
+Python, pnpm, a separate AI account, or a terminal. The Settings page
 uses OpenAI's official standalone Windows installer for Codex, which downloads
 checksum-verified release assets into Codex's standard per-user storage and
 places the app-managed command under the VOD Search application-data folder.
 
 ## Processing schedule
 
-Under **Settings → Processing schedule**, ingestion, local transcription, and
+Under **Settings → Processing schedule**, ingestion, local speech processing, and
 AI summaries can each run at any time or inside a daily local-time window.
 Overnight ranges such as 10:00 PM–7:00 AM are supported. Work that has not
 started remains queued outside its window; a job already running is allowed to
@@ -84,8 +90,8 @@ Every source folder can act as a portable metadata cache. VOD Search always
 looks for a matching `.vod-search/<video-fingerprint>.json` bundle before it
 queues transcription or Codex summarization. A bundle contains timed transcript
 segments, topic boundaries, summaries, entities, events, aliases, and search
-phrases. It never contains the video, absolute local paths, credentials, or
-device-specific vector embeddings.
+phrases. It never contains the video, absolute local paths, credentials, voice
+patterns, speaker labels, or device-specific vector embeddings.
 
 Publishing is opt-in per source folder under **Settings → Source folders**.
 Files are written atomically and identified by a content fingerprint, so the
@@ -116,11 +122,13 @@ pnpm test
 pnpm build
 ```
 
-The bundled Windows runtimes are checksum-pinned builds of FFmpeg and
-`whisper.cpp`. They are downloaded into an ignored `resources/runtime/windows`
+The bundled Windows runtimes are checksum-pinned builds of FFmpeg,
+`whisper.cpp`, and the Sherpa segmentation and speaker-embedding models. They are downloaded into an ignored `resources/runtime/windows`
 directory. Developers can override them with `VOD_SEARCH_FFMPEG_PATH`,
 `VOD_SEARCH_FFPROBE_PATH`, `VOD_SEARCH_WHISPER_PATH`, and
-`VOD_SEARCH_CODEX_PATH`.
+`VOD_SEARCH_CODEX_PATH`. Speaker development can also use
+`VOD_SEARCH_SHERPA_SEGMENTATION_MODEL_PATH` and
+`VOD_SEARCH_SHERPA_EMBEDDING_MODEL_PATH`.
 
 ## Windows installer
 
@@ -165,5 +173,6 @@ reduce SmartScreen warnings and strengthen publisher verification.
 - `packages/database`: SQLite schema, FTS5/`sqlite-vec`, and repositories.
 - `packages/search`: subtitle parsing, chunking, lexical/semantic rank fusion.
 - `packages/inference`: verified models, FFmpeg/Whisper adapters, local BGE,
-  and the schema-validated Codex enrichment client and skill.
+  native Sherpa ONNX diarization, and the schema-validated Codex
+  enrichment client and skill.
 - `packages/contracts`: validated domain and IPC contracts shared by processes.

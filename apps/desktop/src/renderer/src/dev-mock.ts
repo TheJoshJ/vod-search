@@ -7,6 +7,7 @@ import type {
   ModelInstallation,
   ProcessingSchedule,
   SearchHit,
+  SpeakerProfile,
   SourceFolder,
   VodSearchApi
 } from "@vod-search/contracts"
@@ -86,6 +87,12 @@ const stats: LibraryStats = {
   failedJobs: 0
 }
 
+let speakerProfiles: SpeakerProfile[] = [
+  { id: "11111111-1111-4111-8111-111111111111", name: "Alex", sampleCount: 3, createdAtMs: now - 8_000_000, updatedAtMs: now - 80_000 },
+  { id: "22222222-2222-4222-8222-222222222222", name: "Jordan", sampleCount: 2, createdAtMs: now - 6_000_000, updatedAtMs: now - 120_000 }
+]
+const speakerAssignments = new Map<number, string | null>()
+
 let processingSchedule: ProcessingSchedule = {
   ingestion: { enabled: false, startMinute: 8 * 60, endMinute: 22 * 60 },
   transcription: { enabled: false, startMinute: 22 * 60, endMinute: 7 * 60 },
@@ -108,6 +115,55 @@ export function createDevMockApi(): VodSearchApi {
     search: {
       query: async () => ({ hits, elapsedMs: 38, indexedChunkCount: stats.searchableChunks })
     },
+    roughCut: {
+      generate: async (input) => {
+        const before = input.handleBeforeMs ?? 15_000
+        const after = input.handleAfterMs ?? 15_000
+        let cursor = 0
+        const items = input.mediaIds.slice(0, 3).map((mediaId, order) => {
+          const item = media.find((candidate) => candidate.id === mediaId) ?? media[order]!
+          const contentStartMs = 90_000 + order * 180_000
+          const contentEndMs = contentStartMs + 12_000
+          const sourceInMs = Math.max(0, contentStartMs - before)
+          const sourceOutMs = Math.min(item.durationMs ?? contentEndMs + after, contentEndMs + after)
+          const sequenceStartMs = cursor
+          cursor += sourceOutMs - sourceInMs
+          return {
+            id: crypto.randomUUID(),
+            order,
+            mediaId: item.id,
+            sourcePath: `${sourceFolder.path}\\${item.relativePath}`,
+            sourceTitle: item.displayName,
+            sourceDurationMs: item.durationMs ?? 1,
+            contentStartMs,
+            contentEndMs,
+            sourceInMs,
+            sourceOutMs,
+            sequenceStartMs,
+            sequenceEndMs: cursor,
+            handleBeforeMs: contentStartMs - sourceInMs,
+            handleAfterMs: sourceOutMs - contentEndMs,
+            requestedText: order === 0 ? "Set up the failed attempt" : order === 1 ? "Explain the strategy change" : "Finish on the successful retry",
+            matchRationale: "The retrieved transcript directly discusses this requested beat.",
+            transcriptExcerpt: "This sample transcript moment provides grounded evidence for the requested part of the rough cut."
+          }
+        })
+        return {
+          version: 1 as const,
+          id: crypto.randomUUID(),
+          title: input.title ?? "Text-directed rough cut",
+          brief: input.prompt,
+          createdAtMs: Date.now(),
+          frameRate: input.frameRate ?? "30" as const,
+          selectedMediaIds: input.mediaIds,
+          handleBeforeMs: before,
+          handleAfterMs: after,
+          totalDurationMs: cursor,
+          items
+        }
+      },
+      export: async () => ({ xmlPath: "D:\\Exports\\rough-cut.xml", jsonPath: "D:\\Exports\\rough-cut.roughcut.json" })
+    },
     jobs: {
       list: async () => jobs,
       retry: async () => undefined,
@@ -124,6 +180,39 @@ export function createDevMockApi(): VodSearchApi {
       list: async () => models,
       download: async () => undefined,
       cancelDownload: async () => undefined
+    },
+    speakers: {
+      status: async () => ({ state: "ready", stage: "idle", error: null }),
+      reviewQueue: async () => ({
+        profiles: speakerProfiles,
+        items: media.flatMap((item) => {
+          const detail = detailFor(item)
+          return detail.speakers.filter((speaker) => speaker.profileId === null).map((speaker) => {
+            const sample = detail.transcript.find((segment) => segment.mediaSpeakerId === speaker.id)
+            return {
+              ...speaker,
+              mediaTitle: item.displayName,
+              relativePath: item.relativePath,
+              mediaCreatedAtMs: item.createdAtMs,
+              sampleStartMs: sample?.startMs ?? speaker.firstStartMs,
+              sampleEndMs: sample?.endMs ?? speaker.firstStartMs + Math.max(1_000, Math.min(speaker.speechMs, 12_000)),
+              sampleText: sample?.text ?? null
+            }
+          })
+        })
+      }),
+      createProfile: async (mediaSpeakerId, name) => {
+        const timestamp = Date.now()
+        const profile: SpeakerProfile = { id: crypto.randomUUID(), name, sampleCount: 1, createdAtMs: timestamp, updatedAtMs: timestamp }
+        speakerProfiles = [...speakerProfiles, profile]
+        speakerAssignments.set(mediaSpeakerId, profile.id)
+        return profile
+      },
+      assignProfile: async (mediaSpeakerId, profileId) => { speakerAssignments.set(mediaSpeakerId, profileId) },
+      renameProfile: async (profileId, name) => {
+        speakerProfiles = speakerProfiles.map((profile) => profile.id === profileId ? { ...profile, name, updatedAtMs: Date.now() } : profile)
+        return speakerProfiles.find((profile) => profile.id === profileId)!
+      }
     },
     codex: {
       status: async () => codex,
@@ -173,6 +262,13 @@ function createHit(item: MediaAsset, startMs: number, endMs: number, summary: st
 }
 
 function detailFor(item: MediaAsset): MediaDetail {
+  const mediaIndex = media.findIndex((candidate) => candidate.id === item.id)
+  const speakerBase = mediaIndex * 10 + 1
+  const primaryProfileId = speakerAssignments.has(speakerBase)
+    ? speakerAssignments.get(speakerBase) ?? null
+    : speakerProfiles[0]!.id
+  const guestProfileId = speakerAssignments.get(speakerBase + 1) ?? null
+  const thirdProfileId = speakerAssignments.get(speakerBase + 2) ?? null
   const transcript = Array.from({ length: 18 }, (_, index) => ({
     id: index + 1,
     mediaId: item.id,
@@ -182,7 +278,8 @@ function detailFor(item: MediaAsset): MediaDetail {
       ? "I missed the resonance there—the Kalphite King switched, and that is the death we need to review."
       : `The team continues the encounter while discussing positioning, cooldowns, and the next mechanic in the rotation.`,
     source: "whisper" as const,
-    confidence: 0.94
+    confidence: 0.94,
+    mediaSpeakerId: [4, 9, 14].includes(index) ? speakerBase + 1 : index === 12 ? speakerBase + 2 : speakerBase
   }))
   return {
     media: item,
@@ -191,6 +288,13 @@ function detailFor(item: MediaAsset): MediaDetail {
       { startMs: 0, endMs: 600_000, summary: "The session opens with gear checks and several early attempts while the group settles on roles.", entities: ["Kalphite King"], events: ["gear_setup"] },
       { startMs: 600_000, endMs: 1_500_000, summary: "Several close attempts highlight missed defensive timings and one death during a style switch.", entities: ["Resonance", "Kalphite King"], events: ["player_death", "strategy_change"] },
       { startMs: 1_500_000, endMs: item.durationMs ?? 2_600_000, summary: "The group improves consistency, reviews the difficult moments, and completes the remaining attempts.", entities: ["team"], events: ["successful_attempt"] }
-    ]
+    ],
+    speakers: [
+      { id: speakerBase, mediaId: item.id, diarizationLabel: "SPEAKER_00", profileId: primaryProfileId, displayName: speakerProfiles.find((profile) => profile.id === primaryProfileId)?.name ?? "Speaker 1", speechMs: 465_000, turnCount: 14, firstStartMs: 0, suggestedProfileId: null, suggestionScore: null },
+      { id: speakerBase + 1, mediaId: item.id, diarizationLabel: "SPEAKER_01", profileId: guestProfileId, displayName: speakerProfiles.find((profile) => profile.id === guestProfileId)?.name ?? "Speaker 2", speechMs: 93_000, turnCount: 3, firstStartMs: 140_000, suggestedProfileId: guestProfileId ? null : speakerProfiles[1]!.id, suggestionScore: guestProfileId ? null : 0.87 },
+      { id: speakerBase + 2, mediaId: item.id, diarizationLabel: "SPEAKER_02", profileId: thirdProfileId, displayName: speakerProfiles.find((profile) => profile.id === thirdProfileId)?.name ?? "Speaker 3", speechMs: 31_000, turnCount: 1, firstStartMs: 420_000, suggestedProfileId: null, suggestionScore: null }
+    ],
+    speakerProfiles,
+    speakerAnalysis: { state: "ready", error: null }
   }
 }

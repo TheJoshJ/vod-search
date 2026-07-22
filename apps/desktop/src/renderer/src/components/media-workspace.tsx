@@ -1,10 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react"
-import type { MediaDetail, SearchHit } from "@vod-search/contracts"
-import { ArrowLeft, CalendarDays, ChevronLeft, ChevronRight, CircleAlert, Download, Eye, FileText, LoaderCircle, Scissors, Search, Sparkles } from "lucide-react"
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react"
+import type { MediaDetail, MediaSpeaker, SearchHit, SpeakerProfile } from "@vod-search/contracts"
+import { ArrowLeft, CalendarDays, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Download, Eye, FileText, LoaderCircle, Scissors, Search, Sparkles, UserPlus, Users } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverDescription, PopoverHeader, PopoverTitle, PopoverTrigger } from "@/components/ui/popover"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Slider } from "@/components/ui/slider"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { cn } from "@/lib/utils"
 import { areDisplayTextsEquivalent } from "./search-presentation"
@@ -18,6 +21,7 @@ export interface MediaWorkspaceSelection {
   initialMs?: number
   markers?: SearchHit[]
   query?: string
+  returnLabel?: string
 }
 
 interface TimelineMarker {
@@ -35,6 +39,7 @@ export function MediaWorkspace({
   selection: MediaWorkspaceSelection
   onClose: () => void
 }): React.JSX.Element {
+  const returnLabel = selection.returnLabel ?? "library"
   const videoRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const transcriptScrollRef = useRef<HTMLDivElement>(null)
@@ -53,6 +58,7 @@ export function MediaWorkspace({
   const [markerKinds, setMarkerKinds] = useState<Array<TimelineMarker["kind"]>>(
     selection.query ? ["match"] : ["summary"]
   )
+  const [sidebarTab, setSidebarTab] = useState<"transcript" | "speakers">("transcript")
 
   useEffect(() => {
     let cancelled = false
@@ -65,6 +71,7 @@ export function MediaWorkspace({
     setCurrentMs(initialMs)
     setActualDurationMs(0)
     setMarkerKinds(selection.query ? ["match"] : ["summary"])
+    setSidebarTab("transcript")
     previewEndRef.current = null
     lastFollowedSegmentRef.current = null
     transcriptRowsRef.current.clear()
@@ -83,6 +90,12 @@ export function MediaWorkspace({
     return () => { cancelled = true }
   }, [selection])
 
+  useEffect(() => window.vodSearch.events.onLibraryChanged(() => {
+    void window.vodSearch.media.getDetail(selection.mediaId).then(setDetail).catch((reason: unknown) => {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    })
+  }), [selection.mediaId])
+
   const durationMs = Math.max(1, actualDurationMs || detail?.media.durationMs || 1)
   const markers = useMemo(() => buildMarkers(detail, selection.markers ?? []), [detail, selection.markers])
   const visibleMarkers = useMemo(() => markers.filter((marker) => markerKinds.includes(marker.kind)), [markerKinds, markers])
@@ -93,9 +106,10 @@ export function MediaWorkspace({
     () => detail ? findActiveTranscriptSegmentId(detail.transcript, currentMs) : null,
     [currentMs, detail]
   )
+  const speakersById = useMemo(() => new Map(detail?.speakers.map((speaker) => [speaker.id, speaker]) ?? []), [detail?.speakers])
 
   useEffect(() => {
-    if (activeSegmentId === null || lastFollowedSegmentRef.current === activeSegmentId) return
+    if (sidebarTab !== "transcript" || activeSegmentId === null || lastFollowedSegmentRef.current === activeSegmentId) return
 
     const container = transcriptScrollRef.current
     const row = transcriptRowsRef.current.get(activeSegmentId)
@@ -118,7 +132,7 @@ export function MediaWorkspace({
       top: nextScrollTop,
       behavior: scrubbingRef.current ? "auto" : "smooth"
     })
-  }, [activeSegmentId])
+  }, [activeSegmentId, sidebarTab])
 
   function seekTo(milliseconds: number): void {
     previewEndRef.current = null
@@ -143,6 +157,10 @@ export function MediaWorkspace({
     seekTo(startMs)
     previewEndRef.current = endMs
     void videoRef.current?.play().catch(() => undefined)
+  }
+
+  async function refreshDetail(): Promise<void> {
+    setDetail(await window.vodSearch.media.getDetail(selection.mediaId))
   }
 
   function beginScrub(): void {
@@ -184,7 +202,7 @@ export function MediaWorkspace({
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
       <header className="flex h-16 shrink-0 items-center gap-3 border-b px-3">
-        <Button variant="ghost" size="icon-sm" aria-label="Back to library" onClick={onClose}><ArrowLeft /></Button>
+        <Button variant="ghost" size="icon-sm" aria-label={`Back to ${returnLabel}`} onClick={onClose}><ArrowLeft /></Button>
         <div className="min-w-0 flex-1 border-l pl-3">
           <h1 className="truncate text-sm font-semibold tracking-tight" title={detail?.media.displayName ?? selection.title}>{cleanMediaTitle(detail?.media.displayName ?? selection.title)}</h1>
           <div className="mt-0.5 flex min-w-0 items-center gap-3 text-[10px] text-muted-foreground">
@@ -220,7 +238,7 @@ export function MediaWorkspace({
       {loading ? (
         <div className="grid min-h-0 flex-1 place-items-center text-muted-foreground"><LoaderCircle className="size-5 animate-spin" /></div>
       ) : error ? (
-        <div className="grid min-h-0 flex-1 place-items-center p-8"><div className="max-w-sm text-center"><CircleAlert className="mx-auto size-6 text-destructive" /><p className="mt-3 text-sm font-semibold">Couldn’t open this video</p><p className="mt-2 text-xs leading-5 text-muted-foreground">{error}</p><Button variant="outline" size="sm" className="mt-4" onClick={onClose}>Back to library</Button></div></div>
+        <div className="grid min-h-0 flex-1 place-items-center p-8"><div className="max-w-sm text-center"><CircleAlert className="mx-auto size-6 text-destructive" /><p className="mt-3 text-sm font-semibold">Couldn’t open this video</p><p className="mt-2 text-xs leading-5 text-muted-foreground">{error}</p><Button variant="outline" size="sm" className="mt-4" onClick={onClose}>Back to {returnLabel}</Button></div></div>
       ) : detail ? (
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(20rem,25rem)] max-[1050px]:grid-cols-[minmax(0,1fr)_20rem]">
           <main className="min-h-0 overflow-y-auto bg-muted/15">
@@ -338,40 +356,337 @@ export function MediaWorkspace({
             </section>
           </main>
 
-          <aside className="flex min-h-0 flex-col border-l bg-background">
-            <div className="flex h-11 shrink-0 items-center justify-between border-b px-3">
-              <div><h2 className="text-xs font-semibold">Transcript</h2><p className="mt-0.5 text-[9px] text-muted-foreground">Follows playback · select a line to seek</p></div>
-              <span className="font-mono text-[9px] text-muted-foreground">{detail.transcript.length} segments</span>
-            </div>
-            <div ref={transcriptScrollRef} className="min-h-0 flex-1 overflow-y-auto">
+          <aside className="min-h-0 border-l bg-background">
+            <Tabs value={sidebarTab} onValueChange={(value) => setSidebarTab(value as "transcript" | "speakers")} className="h-full min-h-0 gap-0">
+              <div className="flex h-11 shrink-0 items-center border-b px-2">
+                <TabsList className="h-8 w-full rounded-none bg-transparent p-0">
+                  <TabsTrigger value="transcript" className="h-8 rounded-none px-2 text-[11px] shadow-none data-[state=active]:border-x-0 data-[state=active]:border-b-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"><FileText />Transcript <span className="font-mono text-[9px] text-muted-foreground">{detail.transcript.length}</span></TabsTrigger>
+                  <TabsTrigger value="speakers" className="h-8 rounded-none px-2 text-[11px] shadow-none data-[state=active]:border-x-0 data-[state=active]:border-b-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"><Users />Speakers <span className="font-mono text-[9px] text-muted-foreground">{detail.speakers.length}</span></TabsTrigger>
+                </TabsList>
+              </div>
+              <TabsContent value="transcript" className="min-h-0 overflow-hidden">
+                <div ref={transcriptScrollRef} className="h-full overflow-y-auto">
               {detail.transcript.length === 0 ? (
                 <div className="grid min-h-48 place-items-center px-5 text-center"><div><FileText className="mx-auto size-4 text-muted-foreground" /><p className="mt-3 text-xs font-semibold">No transcript yet</p><p className="mt-1 text-[10px] leading-4 text-muted-foreground">This video is waiting for subtitles or local transcription.</p></div></div>
               ) : detail.transcript.map((segment) => {
                 const queryMatch = Boolean(selection.query && searchMatches.some((marker) => rangesOverlap(marker, segment)))
+                const speaker = segment.mediaSpeakerId ? speakersById.get(segment.mediaSpeakerId) : undefined
                 return (
-                <button
-                  type="button"
+                <div
                   key={segment.id}
-                  ref={(node) => {
-                    if (node) transcriptRowsRef.current.set(segment.id, node)
-                    else transcriptRowsRef.current.delete(segment.id)
-                  }}
-                  data-active={activeSegmentId === segment.id}
-                  aria-current={activeSegmentId === segment.id ? "true" : undefined}
-                  onClick={() => seekTo(segment.startMs)}
-                  className={cn("grid w-full cursor-pointer grid-cols-[3.5rem_minmax(0,1fr)] gap-2 border-b border-l-2 border-l-transparent border-r-2 border-r-transparent px-3 py-2.5 text-left transition-colors hover:bg-accent/35 focus-visible:bg-accent/35 focus-visible:outline-none", queryMatch && "border-r-chart-3 bg-chart-3/10", activeSegmentId === segment.id && "border-l-primary bg-accent/65")}
+                  className={cn(
+                    "group relative border-b border-l-2 border-l-transparent border-r-2 border-r-transparent transition-colors hover:bg-accent/35",
+                    queryMatch && "border-r-chart-3 bg-chart-3/10",
+                    activeSegmentId === segment.id && "border-l-primary bg-accent/65"
+                  )}
                 >
-                  <span className={cn("font-mono text-[9px] font-medium tabular-nums text-primary", activeSegmentId === segment.id && "font-semibold")}>{formatTimestamp(segment.startMs)}</span>
-                  <span className={cn("text-[11px] leading-[1.45] text-foreground/90", activeSegmentId === segment.id && "font-medium text-foreground")}><HighlightedTranscriptText text={segment.text} query={selection.query} /></span>
-                </button>
+                  <button
+                    type="button"
+                    ref={(node) => {
+                      if (node) transcriptRowsRef.current.set(segment.id, node)
+                      else transcriptRowsRef.current.delete(segment.id)
+                    }}
+                    data-active={activeSegmentId === segment.id}
+                    aria-current={activeSegmentId === segment.id ? "true" : undefined}
+                    aria-label={`Seek to ${formatTimestamp(segment.startMs)}: ${segment.text}`}
+                    onClick={() => seekTo(segment.startMs)}
+                    className="grid w-full cursor-pointer grid-cols-[3.5rem_minmax(0,1fr)] gap-2 px-3 py-2.5 text-left focus-visible:bg-accent/35 focus-visible:outline-none"
+                  >
+                    <span className={cn("font-mono text-[9px] font-medium tabular-nums text-primary", activeSegmentId === segment.id && "font-semibold")}>{formatTimestamp(segment.startMs)}</span>
+                    <span className="min-w-0">
+                      {speaker && <span aria-hidden="true" className="mb-1 block h-5" />}
+                      <span className={cn("block text-[11px] leading-[1.45] text-foreground/90", activeSegmentId === segment.id && "font-medium text-foreground")}><HighlightedTranscriptText text={segment.text} query={selection.query} /></span>
+                    </span>
+                  </button>
+                  {speaker && (
+                    <div className="absolute left-[4.5rem] right-2 top-1.5 flex min-w-0 items-center">
+                      <TranscriptSpeakerAssignment
+                        speaker={speaker}
+                        profiles={detail.speakerProfiles}
+                        onChanged={refreshDetail}
+                        onError={(reason) => setError(reason instanceof Error ? reason.message : String(reason))}
+                      />
+                    </div>
+                  )}
+                </div>
                 )
               })}
-            </div>
+                </div>
+              </TabsContent>
+              <TabsContent value="speakers" className="min-h-0 overflow-y-auto">
+                <SpeakersPanel detail={detail} onChanged={refreshDetail} onError={(reason) => setError(reason instanceof Error ? reason.message : String(reason))} />
+              </TabsContent>
+            </Tabs>
           </aside>
         </div>
       ) : null}
     </div>
   )
+}
+
+function TranscriptSpeakerAssignment({
+  speaker,
+  profiles,
+  onChanged,
+  onError
+}: {
+  speaker: MediaSpeaker
+  profiles: SpeakerProfile[]
+  onChanged: () => Promise<void>
+  onError: (reason: unknown) => void
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [feedback, setFeedback] = useState<string | null>(null)
+  const { busy, run } = useSpeakerAction(onChanged, onError)
+  const profile = profiles.find((candidate) => candidate.id === speaker.profileId)
+  const suggestion = profiles.find((candidate) => candidate.id === speaker.suggestedProfileId)
+
+  async function assign(profileId: string | null): Promise<void> {
+    setFeedback(null)
+    if (!await run(() => window.vodSearch.speakers.assignProfile(speaker.id, profileId))) return
+    const profileName = profiles.find((candidate) => candidate.id === profileId)?.name
+    setFeedback(profileName
+      ? `Labeled ${speaker.turnCount} ${speaker.turnCount === 1 ? "turn" : "turns"} as ${profileName}.`
+      : `Removed the label from ${speaker.turnCount} ${speaker.turnCount === 1 ? "turn" : "turns"}.`)
+  }
+
+  async function create(name: string): Promise<boolean> {
+    setFeedback(null)
+    const created = await run(() => window.vodSearch.speakers.createProfile(speaker.id, name))
+    if (created) setFeedback(`Created ${name} and labeled ${speaker.turnCount} ${speaker.turnCount === 1 ? "turn" : "turns"}.`)
+    return created
+  }
+
+  return (
+    <Popover open={open} onOpenChange={(nextOpen) => {
+      setOpen(nextOpen)
+      if (nextOpen) setFeedback(null)
+    }}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          className={cn(
+            "h-5 max-w-full gap-1 px-1.5 text-[9px] font-semibold text-muted-foreground hover:bg-background/80 hover:text-foreground",
+            !profile && "text-primary"
+          )}
+          aria-label={`${profile ? `Change ${profile.name}` : `Assign ${speaker.displayName}`} for this transcript voice`}
+        >
+          {profile ? <span className="size-1.5 shrink-0 rounded-full bg-primary/70" /> : <UserPlus className="size-3" />}
+          <span className="truncate">{profile?.name ?? `${speaker.displayName} · Assign`}</span>
+          <ChevronDown className="size-3 shrink-0 opacity-65" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent side="left" align="center" sideOffset={6} className="w-72 p-3">
+        <PopoverHeader>
+          <PopoverTitle className="text-xs">Assign this detected voice</PopoverTitle>
+          <PopoverDescription className="text-[10px] leading-4">The change applies to {speaker.turnCount === 1 ? "the detected turn" : `all ${speaker.turnCount} turns`} for this voice in the video.</PopoverDescription>
+        </PopoverHeader>
+
+        {suggestion && !profile && speaker.suggestionScore !== null && (
+          <div className="mt-3 flex items-center gap-2 border-y border-primary/20 bg-primary/5 py-2">
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[10px] font-semibold">Suggested: {suggestion.name}</div>
+              <div className="text-[9px] text-muted-foreground">{Math.round(speaker.suggestionScore * 100)}% voice similarity</div>
+            </div>
+            <Button size="sm" className="h-7 px-2 text-[10px]" disabled={busy} onClick={() => void assign(suggestion.id)}>Use</Button>
+          </div>
+        )}
+
+        <div className="mt-3">
+          <label className="text-[9px] font-medium uppercase tracking-wide text-muted-foreground">Existing speaker</label>
+          <SpeakerProfileSelect speaker={speaker} profiles={profiles} busy={busy} onAssign={(profileId) => void assign(profileId)} />
+        </div>
+
+        <div className="mt-3 border-t pt-3">
+          <label className="text-[9px] font-medium uppercase tracking-wide text-muted-foreground">New speaker</label>
+          <NewSpeakerProfileForm speaker={speaker} busy={busy} onCreate={create} />
+        </div>
+        {feedback && <p role="status" aria-live="polite" className="mt-3 flex items-center gap-1.5 border-t pt-2 text-[9px] leading-4 text-primary"><CheckCircle2 className="size-3 shrink-0" />{feedback}</p>}
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+function SpeakerProfileSelect({
+  speaker,
+  profiles,
+  busy,
+  onAssign
+}: {
+  speaker: MediaSpeaker
+  profiles: SpeakerProfile[]
+  busy: boolean
+  onAssign: (profileId: string | null) => void
+}): React.JSX.Element {
+  return (
+    <Select value={speaker.profileId ?? "unassigned"} disabled={busy} onValueChange={(value) => onAssign(value === "unassigned" ? null : value)}>
+      <SelectTrigger className="mt-1 h-8 w-full text-xs" aria-label={`Speaker profile for ${speaker.displayName}`}><SelectValue /></SelectTrigger>
+      <SelectContent>
+        <SelectItem value="unassigned">Not tagged</SelectItem>
+        {profiles.map((candidate) => <SelectItem key={candidate.id} value={candidate.id}>{candidate.name} · {candidate.sampleCount} {candidate.sampleCount === 1 ? "sample" : "samples"}</SelectItem>)}
+      </SelectContent>
+    </Select>
+  )
+}
+
+function NewSpeakerProfileForm({
+  speaker,
+  busy,
+  onCreate
+}: {
+  speaker: MediaSpeaker
+  busy: boolean
+  onCreate: (name: string) => Promise<boolean>
+}): React.JSX.Element {
+  const [name, setName] = useState("")
+
+  async function submit(event: FormEvent): Promise<void> {
+    event.preventDefault()
+    const nextName = name.trim()
+    if (!nextName || busy) return
+    if (await onCreate(nextName)) setName("")
+  }
+
+  return (
+    <form className="mt-1 flex gap-1.5" onSubmit={(event) => void submit(event)}>
+      <Input value={name} disabled={busy} onChange={(event) => setName(event.target.value)} aria-label={`Create a new profile for ${speaker.displayName}`} placeholder="Name this speaker" className="h-8 text-xs" />
+      <Button type="submit" size="sm" disabled={busy || !name.trim()}>{busy ? <LoaderCircle className="animate-spin" /> : <UserPlus />}Create</Button>
+    </form>
+  )
+}
+
+function useSpeakerAction(onChanged: () => Promise<void>, onError: (reason: unknown) => void): {
+  busy: boolean
+  run: (action: () => Promise<unknown>) => Promise<boolean>
+} {
+  const [busy, setBusy] = useState(false)
+
+  async function run(action: () => Promise<unknown>): Promise<boolean> {
+    setBusy(true)
+    try {
+      await action()
+      await onChanged()
+      return true
+    } catch (reason) {
+      onError(reason)
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return { busy, run }
+}
+
+function SpeakersPanel({
+  detail,
+  onChanged,
+  onError
+}: {
+  detail: MediaDetail
+  onChanged: () => Promise<void>
+  onError: (reason: unknown) => void
+}): React.JSX.Element {
+  const analysis = detail.speakerAnalysis
+  if (analysis.state === "setup-required") {
+    return <SpeakerEmptyState icon={Users} title="Speaker recognition is unavailable" description="The bundled Sherpa ONNX models are missing from this build. Reinstall VOD Search to restore local speaker analysis." />
+  }
+  if (analysis.state === "queued" || analysis.state === "running") {
+    return <SpeakerEmptyState icon={LoaderCircle} spinning title={analysis.state === "running" ? "Identifying speakers" : "Speaker analysis queued"} description="The transcript stays available while local speaker analysis runs in the background." />
+  }
+  if (analysis.state === "failed") {
+    return <SpeakerEmptyState icon={CircleAlert} title="Speaker analysis stopped" description={analysis.error ?? "Retry the diarization job from Activity."} destructive />
+  }
+  if (detail.speakers.length === 0) {
+    return <SpeakerEmptyState icon={Users} title="No distinct speakers found" description="Local analysis completed, but it did not return a usable voice pattern for this clip." />
+  }
+
+  return (
+    <div>
+      <div className="border-b bg-muted/20 px-3 py-3">
+        <p className="text-[10px] leading-4 text-muted-foreground">Tag a detected voice once, then reuse or accept that pattern in later clips. Every correction updates the local pattern.</p>
+      </div>
+      <div className="divide-y">
+        {detail.speakers.map((speaker, index) => (
+          <SpeakerEditor
+            key={speaker.id}
+            speaker={speaker}
+            index={index}
+            profiles={detail.speakerProfiles}
+            onChanged={onChanged}
+            onError={onError}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function SpeakerEditor({
+  speaker,
+  index,
+  profiles,
+  onChanged,
+  onError
+}: {
+  speaker: MediaSpeaker
+  index: number
+  profiles: SpeakerProfile[]
+  onChanged: () => Promise<void>
+  onError: (reason: unknown) => void
+}): React.JSX.Element {
+  const profile = profiles.find((candidate) => candidate.id === speaker.profileId)
+  const suggestion = profiles.find((candidate) => candidate.id === speaker.suggestedProfileId)
+  const [profileName, setProfileName] = useState(profile?.name ?? "")
+  const { busy, run } = useSpeakerAction(onChanged, onError)
+
+  useEffect(() => setProfileName(profile?.name ?? ""), [profile?.name])
+
+  return (
+    <section className="px-3 py-3">
+      <div className="flex items-start gap-2.5">
+        <div className="grid size-7 shrink-0 place-items-center rounded-full bg-primary/10 text-[10px] font-semibold text-primary">{index + 1}</div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <h3 className="truncate text-xs font-semibold">{speaker.displayName}</h3>
+            {profile ? <Badge variant="accent" className="h-4 px-1.5 text-[8px]">Tagged</Badge> : <Badge variant="secondary" className="h-4 px-1.5 text-[8px]">Detected</Badge>}
+          </div>
+          <div className="mt-1 flex gap-2 font-mono text-[9px] text-muted-foreground">
+            <span>{formatTimestamp(speaker.speechMs)} speaking</span>
+            <span>{speaker.turnCount} {speaker.turnCount === 1 ? "turn" : "turns"}</span>
+            <span>first at {formatTimestamp(speaker.firstStartMs)}</span>
+          </div>
+        </div>
+        {busy && <LoaderCircle className="mt-1 size-3.5 animate-spin text-muted-foreground" />}
+      </div>
+
+      {suggestion && speaker.suggestionScore !== null && (
+        <div className="mt-3 flex items-center gap-2 border border-primary/20 bg-primary/5 px-2 py-2">
+          <div className="min-w-0 flex-1"><div className="truncate text-[10px] font-semibold">Looks like {suggestion.name}</div><div className="mt-0.5 text-[9px] text-muted-foreground">{Math.round(speaker.suggestionScore * 100)}% pattern match</div></div>
+          <Button size="sm" className="h-7 px-2 text-[10px]" disabled={busy} onClick={() => void run(() => window.vodSearch.speakers.assignProfile(speaker.id, suggestion.id))}>Use match</Button>
+        </div>
+      )}
+
+      <div className="mt-3">
+        <label className="text-[9px] font-medium uppercase tracking-wide text-muted-foreground">Speaker pattern</label>
+        <SpeakerProfileSelect speaker={speaker} profiles={profiles} busy={busy} onAssign={(profileId) => void run(() => window.vodSearch.speakers.assignProfile(speaker.id, profileId))} />
+      </div>
+
+      {profile ? (
+        <div className="mt-2 flex gap-1.5">
+          <Input value={profileName} disabled={busy} onChange={(event) => setProfileName(event.target.value)} aria-label={`Rename ${profile.name}`} className="h-8 text-xs" />
+          <Button variant="outline" size="sm" disabled={busy || !profileName.trim() || profileName.trim() === profile.name} onClick={() => void run(() => window.vodSearch.speakers.renameProfile(profile.id, profileName.trim()))}>Rename</Button>
+        </div>
+      ) : (
+        <NewSpeakerProfileForm speaker={speaker} busy={busy} onCreate={(name) => run(() => window.vodSearch.speakers.createProfile(speaker.id, name))} />
+      )}
+    </section>
+  )
+}
+
+function SpeakerEmptyState({ icon: Icon, title, description, spinning = false, destructive = false }: { icon: typeof Users; title: string; description: string; spinning?: boolean; destructive?: boolean }): React.JSX.Element {
+  return <div className="grid min-h-56 place-items-center px-6 text-center"><div><Icon className={cn("mx-auto size-5 text-muted-foreground", spinning && "animate-spin", destructive && "text-destructive")} /><p className="mt-3 text-xs font-semibold">{title}</p><p className="mt-1 max-w-64 text-[10px] leading-4 text-muted-foreground">{description}</p></div></div>
 }
 
 function ClipComposer({

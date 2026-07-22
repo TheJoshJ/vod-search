@@ -75,4 +75,21 @@ describe("SearchService ranking modes", () => {
     })
     expect(response.hits).toEqual([])
   })
+
+  it("passes selected media constraints to both retrieval modes", () => {
+    const calls: Array<string[] | undefined> = []
+    const constrained: SearchRepository = {
+      lexicalSearch: (_query, _missing, _limit, _after, _before, mediaIds) => { calls.push(mediaIds); return [] },
+      semanticSearch: (_embedding, _missing, _limit, _after, _before, mediaIds) => { calls.push(mediaIds); return [] },
+      countSearchChunks: () => 0
+    }
+    new SearchService(constrained).search({
+      query: "a story beat",
+      mode: "hybrid",
+      includeMissing: false,
+      limit: 10,
+      mediaIds: ["chosen-video"]
+    }, new Float32Array([1]))
+    expect(calls).toEqual([["chosen-video"], ["chosen-video"]])
+  })
 })

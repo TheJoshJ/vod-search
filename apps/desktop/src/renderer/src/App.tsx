@@ -1,4 +1,4 @@
-import { type FormEvent, type SetStateAction, useCallback, useEffect, useMemo, useState } from "react"
+import { type FormEvent, type SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   defaultProcessingSchedule,
   isJobStageAllowed,
@@ -13,8 +13,13 @@ import {
   type ProcessingSchedule,
   type ProcessingScheduleGroup,
   type ProcessingWindow,
+  type RoughCutPlan,
   type SearchHit,
   type SearchMode,
+  type SpeakerEngineStatus,
+  type SpeakerProfile,
+  type SpeakerReviewItem,
+  type SpeakerReviewQueue,
   type SourceFolder
 } from "@vod-search/contracts"
 import {
@@ -40,16 +45,22 @@ import {
   Play,
   Plus,
   Search,
+  Scissors,
   Share2,
   SlidersHorizontal,
   Settings,
   Sparkles,
   Sun,
   Trash2,
+  UserPlus,
+  Users,
   Video,
+  Volume2,
   X
 } from "lucide-react"
 import { MediaWorkspace, type MediaWorkspaceSelection } from "@/components/media-workspace"
+import { RoughCutWorkspace } from "@/components/rough-cut-workspace"
+import { getLibrarySearchSubmitAction } from "@/components/library-search"
 import { getSearchResultCopy } from "@/components/search-presentation"
 import { cleanMediaTitle, organizeSearchHits, splitQueryMatches, type SearchResultCluster } from "@/components/search-workflow"
 import { VideoThumbnail } from "@/components/video-thumbnail"
@@ -81,7 +92,7 @@ import { Switch } from "@/components/ui/switch"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { cn } from "@/lib/utils"
 
-type View = "library" | "activity" | "settings"
+type View = "library" | "rough-cut" | "speakers" | "activity" | "settings"
 type Theme = "light" | "dark"
 
 interface LibrarySearchState {
@@ -92,6 +103,14 @@ interface LibrarySearchState {
   dateTo: string
   hits: SearchHit[]
   searched: boolean
+}
+
+interface SpeakerAudioPreviewState {
+  itemId: number
+  status: "loading" | "playing" | "paused"
+  startMs: number
+  endMs: number
+  currentMs: number
 }
 
 const initialLibrarySearchState: LibrarySearchState = {
@@ -125,6 +144,11 @@ const checkingCodex: CodexStatus = {
   error: null
 }
 
+const emptySpeakerReviewQueue: SpeakerReviewQueue = {
+  items: [],
+  profiles: []
+}
+
 export function App(): React.JSX.Element {
   const [view, setView] = useState<View>("library")
   const [folders, setFolders] = useState<SourceFolder[]>([])
@@ -134,8 +158,10 @@ export function App(): React.JSX.Element {
   const [codex, setCodex] = useState<CodexStatus>(checkingCodex)
   const [stats, setStats] = useState<LibraryStats>(emptyStats)
   const [processingSchedule, setProcessingSchedule] = useState<ProcessingSchedule>(defaultProcessingSchedule)
+  const [speakerReviewQueue, setSpeakerReviewQueue] = useState<SpeakerReviewQueue>(emptySpeakerReviewQueue)
   const [selection, setSelection] = useState<MediaWorkspaceSelection | null>(null)
   const [librarySearch, setLibrarySearch] = useState<LibrarySearchState>(initialLibrarySearchState)
+  const [roughCutPlan, setRoughCutPlan] = useState<RoughCutPlan | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [theme, setTheme] = useState<Theme>(() => {
     const saved = localStorage.getItem("vod-search-theme")
@@ -158,6 +184,7 @@ export function App(): React.JSX.Element {
   const refreshModels = useCallback(async () => setModels(await window.vodSearch.models.list()), [])
   const refreshCodex = useCallback(async () => setCodex(await window.vodSearch.codex.status()), [])
   const refreshProcessingSchedule = useCallback(async () => setProcessingSchedule(await window.vodSearch.jobs.getProcessingSchedule()), [])
+  const refreshSpeakerReviewQueue = useCallback(async () => setSpeakerReviewQueue(await window.vodSearch.speakers.reviewQueue()), [])
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark")
@@ -170,7 +197,11 @@ export function App(): React.JSX.Element {
     void refreshModels().catch(showError)
     void refreshCodex().catch(showError)
     void refreshProcessingSchedule().catch(showError)
-    const removeLibraryListener = window.vodSearch.events.onLibraryChanged(() => void refreshLibrary().catch(showError))
+    void refreshSpeakerReviewQueue().catch(showError)
+    const removeLibraryListener = window.vodSearch.events.onLibraryChanged(() => {
+      void refreshLibrary().catch(showError)
+      void refreshSpeakerReviewQueue().catch(showError)
+    })
     const removeJobsListener = window.vodSearch.events.onJobsChanged(() => {
       void refreshJobs().catch(showError)
       void refreshLibrary().catch(showError)
@@ -178,7 +209,7 @@ export function App(): React.JSX.Element {
     const removeModelsListener = window.vodSearch.events.onModelsChanged(() => void refreshModels().catch(showError))
     const removeCodexListener = window.vodSearch.events.onCodexChanged(() => void refreshCodex().catch(showError))
     return () => { removeLibraryListener(); removeJobsListener(); removeModelsListener(); removeCodexListener() }
-  }, [refreshCodex, refreshJobs, refreshLibrary, refreshModels, refreshProcessingSchedule])
+  }, [refreshCodex, refreshJobs, refreshLibrary, refreshModels, refreshProcessingSchedule, refreshSpeakerReviewQueue])
 
   function showError(reason: unknown): void {
     setError(reason instanceof Error ? reason.message : String(reason))
@@ -222,7 +253,7 @@ export function App(): React.JSX.Element {
 
   return (
     <div className="flex h-screen min-h-0 overflow-hidden bg-background font-sans text-foreground antialiased">
-      <Sidebar view={view} setView={setView} stats={stats} theme={theme} setTheme={setTheme} />
+      <Sidebar view={view} setView={setView} stats={stats} unassignedSpeakerCount={speakerReviewQueue.items.length} theme={theme} setTheme={setTheme} />
       <main className="relative min-w-0 flex-1 overflow-hidden">
         <ErrorNotice error={error} onClose={() => setError(null)} />
         {view === "library" && (
@@ -240,6 +271,15 @@ export function App(): React.JSX.Element {
             onError={showError}
             searchState={librarySearch}
             setSearchState={setLibrarySearch}
+          />
+        )}
+        {view === "rough-cut" && <RoughCutWorkspace media={media} codex={codex} plan={roughCutPlan} onPlanChange={setRoughCutPlan} onOpen={setSelection} onError={showError} />}
+        {view === "speakers" && (
+          <SpeakersWorkspace
+            queue={speakerReviewQueue}
+            onRefresh={refreshSpeakerReviewQueue}
+            onOpen={(item) => setSelection({ mediaId: item.mediaId, title: item.mediaTitle, initialMs: item.sampleStartMs })}
+            onError={showError}
           />
         )}
         {view === "activity" && <ActivityWorkspace jobs={jobs} media={media} stats={stats} processingSchedule={processingSchedule} onError={showError} />}
@@ -279,12 +319,14 @@ function Sidebar({
   view,
   setView,
   stats,
+  unassignedSpeakerCount,
   theme,
   setTheme
 }: {
   view: View
   setView: (view: View) => void
   stats: LibraryStats
+  unassignedSpeakerCount: number
   theme: Theme
   setTheme: (theme: Theme) => void
 }): React.JSX.Element {
@@ -299,6 +341,8 @@ function Sidebar({
       </div>
       <nav className="mt-5 space-y-0.5">
         <SidebarButton active={view === "library"} icon={Library} label="Library" onClick={() => setView("library")} />
+        <SidebarButton active={view === "rough-cut"} icon={Scissors} label="Rough cut" onClick={() => setView("rough-cut")} />
+        <SidebarButton active={view === "speakers"} icon={Users} label="Speakers" badge={unassignedSpeakerCount || undefined} onClick={() => setView("speakers")} />
         <SidebarButton active={view === "activity"} icon={Activity} label="Activity" badge={stats.runningJobs + stats.queuedJobs || undefined} onClick={() => setView("activity")} />
         <SidebarButton active={view === "settings"} icon={Settings} label="Settings" badge={stats.failedJobs || undefined} onClick={() => setView("settings")} />
       </nav>
@@ -360,6 +404,7 @@ function LibraryWorkspace({
   setSearchState: (value: SetStateAction<LibrarySearchState>) => void
 }): React.JSX.Element {
   const [searching, setSearching] = useState(false)
+  const searchRequestIdRef = useRef(0)
   const { query, submittedQuery, mode, dateFrom, dateTo, hits, searched } = searchState
   const semanticReady = models.some((model) => model.modelId === "bge-small-en-v1.5" && model.status === "installed")
   const folderById = useMemo(() => new Map(folders.map((folder) => [folder.id, folder.path])), [folders])
@@ -368,11 +413,19 @@ function LibraryWorkspace({
     setSearchState((current) => ({ ...current, ...patch }))
   }
 
-  async function submitSearch(event: FormEvent): Promise<void> {
-    event.preventDefault()
-    if (!query.trim()) return
+  async function runSearch(): Promise<void> {
+    const action = getLibrarySearchSubmitAction(query, searched)
+    if (searching && action === "search") return
+    if (action === "clear") {
+      clearSearch()
+      return
+    }
+    if (action === "none") return
+
     const nextSubmittedQuery = query.trim()
+    const requestId = ++searchRequestIdRef.current
     setSearching(true)
+    updateSearch({ hits: [], searched: true, submittedQuery: nextSubmittedQuery })
     try {
       const response = await window.vodSearch.search.query({
         query: nextSubmittedQuery,
@@ -382,18 +435,34 @@ function LibraryWorkspace({
         includeMissing: false,
         limit: 100
       })
+      if (requestId !== searchRequestIdRef.current) return
       updateSearch({ hits: response.hits, searched: true, submittedQuery: nextSubmittedQuery })
     } catch (reason) {
+      if (requestId !== searchRequestIdRef.current) return
       updateSearch({ hits: [], searched: true, submittedQuery: nextSubmittedQuery })
       onError(reason)
     } finally {
-      setSearching(false)
+      if (requestId === searchRequestIdRef.current) setSearching(false)
     }
   }
 
+  function submitSearch(event: FormEvent): void {
+    event.preventDefault()
+    void runSearch()
+  }
+
   function clearSearch(): void {
+    searchRequestIdRef.current += 1
+    setSearching(false)
     setSearchState({ ...initialLibrarySearchState, mode })
   }
+
+  function clearSearchInput(): void {
+    if (searched || searching) clearSearch()
+    else updateSearch({ query: "" })
+  }
+
+  const submitAction = getLibrarySearchSubmitAction(query, searched)
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -402,15 +471,30 @@ function LibraryWorkspace({
         description={stats.totalMedia ? `${stats.totalMedia.toLocaleString()} videos · ${formatDuration(stats.totalDurationMs)} · ${stats.searchableChunks.toLocaleString()} searchable moments` : "Add a folder to begin indexing"}
         actions={<Button size="sm" onClick={() => onAddFolder(false)}><Plus />Add folder</Button>}
       />
-      {media.length > 0 && <form onSubmit={(event) => void submitSearch(event)} className="border-b bg-muted/20 px-5 py-3">
+      {media.length > 0 && <form onSubmit={submitSearch} className="border-b bg-muted/20 px-5 py-3">
         <div className="mx-auto flex max-w-[1480px] flex-wrap items-center gap-2">
           <div className="relative min-w-[18rem] flex-1">
             <Search className="absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input value={query} onChange={(event) => updateSearch({ query: event.target.value })} className="h-8 bg-background pl-8 pr-8 text-xs shadow-none" placeholder="Search dialogue, people, places, or events" />
-            {query && <button type="button" aria-label="Clear query" onClick={() => updateSearch({ query: "" })} className="absolute right-2 top-1/2 grid size-5 -translate-y-1/2 cursor-pointer place-items-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"><X className="size-3" /></button>}
+            <Input
+              value={query}
+              onChange={(event) => updateSearch({ query: event.target.value })}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault()
+                  void runSearch()
+                  return
+                }
+                if (event.key !== "Escape" || (!query && !searched && !searching)) return
+                event.preventDefault()
+                clearSearchInput()
+              }}
+              className="h-8 bg-background pl-8 pr-8 text-xs shadow-none"
+              placeholder="Search dialogue, people, places, or events"
+            />
+            {(query || searched || searching) && <button type="button" aria-label={searched || searching ? "Clear search and show all videos" : "Clear query"} onClick={clearSearchInput} className="absolute right-2 top-1/2 grid size-5 -translate-y-1/2 cursor-pointer place-items-center rounded text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/30"><X className="size-3" /></button>}
           </div>
           <SearchFilters mode={mode} dateFrom={dateFrom} dateTo={dateTo} onChange={updateSearch} />
-          <Button type="submit" size="sm" disabled={searching || !query.trim()}>{searching ? <LoaderCircle className="animate-spin" /> : <Search />}Search</Button>
+          <Button type="submit" size="sm" disabled={searching || submitAction === "none"}>{searching ? <LoaderCircle className="animate-spin" /> : submitAction === "clear" ? <X /> : <Search />}{searching ? "Searching" : submitAction === "clear" ? "Show all" : "Search"}</Button>
           <div className="ml-auto flex items-center gap-1.5 text-[10px] text-muted-foreground max-[1240px]:hidden">
             <span className={cn("size-1.5 rounded-full", semanticReady ? "bg-primary" : "bg-muted-foreground/45")} />
             {semanticReady ? "Semantic index ready" : "Keyword search available"}
@@ -535,6 +619,11 @@ function SearchResults({ hits, query, searching, onClear, onOpen, onError }: { h
     return grouped
   }, [organized.strongHits])
 
+  useEffect(() => {
+    setShowLowerConfidence(false)
+    setExpandedClusters(new Set())
+  }, [query])
+
   function openHit(hit: SearchHit): void {
     const strongMarkers = markersByMedia.get(hit.mediaId) ?? []
     const markers = strongMarkers.some((candidate) => candidate.startMs === hit.startMs && candidate.endMs === hit.endMs)
@@ -560,9 +649,11 @@ function SearchResults({ hits, query, searching, onClear, onOpen, onError }: { h
           <span className="ml-2 truncate text-muted-foreground">for “{query}”</span>
           {!showLowerConfidence && organized.lowerConfidenceCount > 0 && <span className="ml-2 text-[10px] text-muted-foreground">· {organized.lowerConfidenceCount} lower confidence hidden</span>}
         </div>
-        <Button variant="ghost" size="sm" className="h-7" onClick={onClear}><X />Clear</Button>
+        <Button variant="ghost" size="sm" className="h-7" onClick={onClear}><X />Clear search</Button>
       </div>
-      {!searching && hits.length === 0 ? (
+      {searching ? (
+        <div role="status" aria-live="polite" className="grid min-h-64 place-items-center border-b text-center"><div><LoaderCircle className="mx-auto size-5 animate-spin text-primary" /><p className="mt-3 text-sm font-semibold">Searching indexed moments</p><p className="mt-1 text-xs text-muted-foreground">Looking across transcripts for “{query}”.</p></div></div>
+      ) : hits.length === 0 ? (
         <div className="grid min-h-64 place-items-center border-b text-center"><div><Search className="mx-auto size-5 text-muted-foreground" /><p className="mt-3 text-sm font-semibold">No matching moments</p><p className="mt-1 text-xs text-muted-foreground">Try a broader phrase, exact-words mode, or another date range.</p></div></div>
       ) : organized.groups.map((group) => (
         <section key={group.mediaId} aria-label={`Matches in ${group.title}`} className="border-b">
@@ -710,6 +801,311 @@ function ReadinessRow({ label, description, ready, busy = false }: { label: stri
   return <div className="flex items-center gap-3 py-3"><span className={cn("grid size-5 shrink-0 place-items-center rounded-full border", ready && "border-primary/35 bg-primary/10 text-primary")}>{busy ? <LoaderCircle className="size-3 animate-spin" /> : ready ? <CheckCircle2 className="size-3" /> : <span className="size-1.5 rounded-full bg-muted-foreground/45" />}</span><div className="min-w-0"><div className="text-[11px] font-medium">{label}</div><div className="mt-0.5 truncate text-[9px] text-muted-foreground">{description}</div></div></div>
 }
 
+function SpeakersWorkspace({
+  queue,
+  onRefresh,
+  onOpen,
+  onError
+}: {
+  queue: SpeakerReviewQueue
+  onRefresh: () => Promise<void>
+  onOpen: (item: SpeakerReviewItem) => void
+  onError: (error: unknown) => void
+}): React.JSX.Element {
+  const [query, setQuery] = useState("")
+  const [filter, setFilter] = useState<"all" | "suggested">("all")
+  const [audioPreview, setAudioPreview] = useState<SpeakerAudioPreviewState | null>(null)
+  const audioRef = useRef<HTMLAudioElement>(null)
+  const audioRequestRef = useRef(0)
+  const suggestedCount = queue.items.filter((item) => item.suggestedProfileId !== null).length
+  const normalizedQuery = query.trim().toLocaleLowerCase("en-US")
+  const visibleItems = queue.items.filter((item) => {
+    if (filter === "suggested" && item.suggestedProfileId === null) return false
+    if (!normalizedQuery) return true
+    return [item.mediaTitle, item.relativePath, item.sampleText ?? "", item.displayName]
+      .some((value) => value.toLocaleLowerCase("en-US").includes(normalizedQuery))
+  })
+
+  useEffect(() => () => {
+    audioRequestRef.current += 1
+    audioRef.current?.pause()
+  }, [])
+
+  useEffect(() => {
+    if (!audioPreview || queue.items.some((item) => item.id === audioPreview.itemId)) return
+    audioRequestRef.current += 1
+    audioRef.current?.pause()
+    setAudioPreview(null)
+  }, [audioPreview?.itemId, queue.items])
+
+  async function toggleAudioPreview(item: SpeakerReviewItem): Promise<void> {
+    const audio = audioRef.current
+    if (!audio) return
+
+    if (audioPreview?.itemId === item.id) {
+      if (audioPreview.status === "loading") return
+      if (audioPreview.status === "playing") {
+        audio.pause()
+        setAudioPreview((current) => current ? { ...current, status: "paused", currentMs: Math.round(audio.currentTime * 1000) } : current)
+        return
+      }
+      try {
+        if (audio.currentTime * 1000 >= audioPreview.endMs - 50) audio.currentTime = audioPreview.startMs / 1000
+        await audio.play()
+        setAudioPreview((current) => current ? { ...current, status: "playing" } : current)
+      } catch (error) {
+        setAudioPreview(null)
+        onError(error)
+      }
+      return
+    }
+
+    const requestId = audioRequestRef.current + 1
+    audioRequestRef.current = requestId
+    audio.pause()
+    const [startMs, requestedEndMs] = speakerAudioPreviewRange(item)
+    setAudioPreview({ itemId: item.id, status: "loading", startMs, endMs: requestedEndMs, currentMs: startMs })
+
+    try {
+      const source = await window.vodSearch.media.getPlaybackSource(item.mediaId)
+      if (audioRequestRef.current !== requestId) return
+      if (!source.available || !source.url) throw new Error("The source file is currently unavailable for audio preview.")
+
+      audio.src = source.url
+      audio.load()
+      await waitForAudioMetadata(audio)
+      if (audioRequestRef.current !== requestId) return
+
+      const durationMs = Number.isFinite(audio.duration) ? Math.round(audio.duration * 1000) : requestedEndMs
+      const playableStartMs = Math.min(startMs, Math.max(0, durationMs - 1))
+      const playableEndMs = Math.min(requestedEndMs, durationMs)
+      if (playableEndMs <= playableStartMs) throw new Error("That speaker sample falls outside the available media.")
+
+      audio.currentTime = playableStartMs / 1000
+      setAudioPreview({ itemId: item.id, status: "loading", startMs: playableStartMs, endMs: playableEndMs, currentMs: playableStartMs })
+      await audio.play()
+      if (audioRequestRef.current !== requestId) {
+        audio.pause()
+        return
+      }
+      setAudioPreview({ itemId: item.id, status: "playing", startMs: playableStartMs, endMs: playableEndMs, currentMs: playableStartMs })
+    } catch (error) {
+      if (audioRequestRef.current !== requestId) return
+      setAudioPreview(null)
+      onError(error)
+    }
+  }
+
+  function handleAudioTimeUpdate(): void {
+    const audio = audioRef.current
+    if (!audio || !audioPreview) return
+    const currentMs = Math.round(audio.currentTime * 1000)
+    if (currentMs >= audioPreview.endMs) {
+      audio.pause()
+      audio.currentTime = audioPreview.startMs / 1000
+      setAudioPreview(null)
+      return
+    }
+    setAudioPreview((current) => current && current.itemId === audioPreview.itemId ? { ...current, currentMs } : current)
+  }
+
+  return (
+    <>
+      <audio
+        ref={audioRef}
+        className="hidden"
+        preload="metadata"
+        onTimeUpdate={handleAudioTimeUpdate}
+        onEnded={() => setAudioPreview(null)}
+      />
+      <WorkspacePage
+        title="Speakers"
+        description="Review and name detected voices across your local video library"
+        actions={queue.items.length > 0 ? <Badge variant="secondary">{queue.items.length.toLocaleString()} unassigned</Badge> : undefined}
+      >
+      <div className="grid grid-cols-2 border-b">
+        <InlineMetric label="Unassigned voices" value={queue.items.length} />
+        <InlineMetric label="Suggested matches" value={suggestedCount} tone={suggestedCount > 0 ? "healthy" : "default"} />
+      </div>
+      <div className="flex min-h-14 items-center gap-3 border-b py-2.5">
+        <div className="relative min-w-48 flex-1">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter videos or transcript text" aria-label="Filter unassigned speakers" className="h-8 pl-8 text-xs" />
+        </div>
+        <ToggleGroup type="single" variant="outline" size="sm" value={filter} onValueChange={(value) => { if (value) setFilter(value as typeof filter) }}>
+          <ToggleGroupItem value="all">All <span className="font-mono text-[9px]">{queue.items.length}</span></ToggleGroupItem>
+          <ToggleGroupItem value="suggested">Suggested <span className="font-mono text-[9px]">{suggestedCount}</span></ToggleGroupItem>
+        </ToggleGroup>
+      </div>
+
+      {queue.items.length === 0 ? (
+        <SpeakerReviewEmpty title="All detected voices are assigned" description="New voices will appear here after speaker analysis finishes for an ingested file." />
+      ) : visibleItems.length === 0 ? (
+        <SpeakerReviewEmpty title="No voices match this filter" description="Try a different video title, transcript phrase, or review all unassigned voices." />
+      ) : (
+        <div>
+          <div className="grid grid-cols-[minmax(12rem,1.2fr)_minmax(11rem,1fr)_minmax(15rem,1.1fr)] gap-4 border-b py-2 font-mono text-[9px] uppercase tracking-[0.12em] text-muted-foreground">
+            <span>File and voice</span><span>Transcript evidence</span><span>Assign speaker</span>
+          </div>
+          {visibleItems.map((item) => (
+            <SpeakerReviewRow
+              key={item.id}
+              item={item}
+              profiles={queue.profiles}
+              audioPreview={audioPreview?.itemId === item.id ? audioPreview : null}
+              onRefresh={onRefresh}
+              onOpen={() => onOpen(item)}
+              onToggleAudio={() => void toggleAudioPreview(item)}
+              onError={onError}
+            />
+          ))}
+        </div>
+      )}
+      </WorkspacePage>
+    </>
+  )
+}
+
+function SpeakerReviewRow({
+  item,
+  profiles,
+  audioPreview,
+  onRefresh,
+  onOpen,
+  onToggleAudio,
+  onError
+}: {
+  item: SpeakerReviewItem
+  profiles: SpeakerProfile[]
+  audioPreview: SpeakerAudioPreviewState | null
+  onRefresh: () => Promise<void>
+  onOpen: () => void
+  onToggleAudio: () => void
+  onError: (error: unknown) => void
+}): React.JSX.Element {
+  const [newName, setNewName] = useState("")
+  const [busy, setBusy] = useState(false)
+  const suggestion = profiles.find((profile) => profile.id === item.suggestedProfileId)
+
+  async function run(action: () => Promise<unknown>): Promise<void> {
+    setBusy(true)
+    try {
+      await action()
+      await onRefresh()
+    } catch (error) {
+      onError(error)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function createProfile(event?: FormEvent): void {
+    event?.preventDefault()
+    if (!newName.trim() || busy) return
+    void run(() => window.vodSearch.speakers.createProfile(item.id, newName.trim()))
+  }
+
+  return (
+    <section data-media-title={cleanMediaTitle(item.mediaTitle)} data-speaker-name={item.displayName} className="grid grid-cols-[minmax(12rem,1.2fr)_minmax(11rem,1fr)_minmax(15rem,1.1fr)] items-start gap-4 border-b py-4">
+      <div className="flex min-w-0 items-start gap-2.5">
+        <div className="grid size-7 shrink-0 place-items-center rounded-full bg-primary/10 text-[10px] font-semibold text-primary">{speakerInitial(item)}</div>
+        <div className="min-w-0">
+          <div className="truncate text-xs font-semibold" title={item.mediaTitle}>{cleanMediaTitle(item.mediaTitle)}</div>
+          <div className="mt-1 truncate font-mono text-[9px] text-muted-foreground" title={item.relativePath}>{item.relativePath}</div>
+          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[9px] text-muted-foreground">
+            <span>{item.displayName}</span>
+            <span>{formatTimestamp(item.speechMs)} speaking</span>
+            <span>{item.turnCount} {item.turnCount === 1 ? "turn" : "turns"}</span>
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-1">
+            <Button variant="ghost" size="sm" className="h-7 px-2 text-[10px]" onClick={onOpen}><Video />Open at {formatTimestamp(item.sampleStartMs)}</Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-[10px]"
+              disabled={audioPreview?.status === "loading"}
+              aria-label={`${audioPreview?.status === "playing" ? "Pause" : "Play"} audio-only preview for ${item.displayName}`}
+              aria-pressed={audioPreview?.status === "playing"}
+              onClick={onToggleAudio}
+            >
+              {audioPreview?.status === "loading" ? <LoaderCircle className="animate-spin" /> : audioPreview?.status === "playing" ? <Pause /> : <Volume2 />}
+              {audioPreview?.status === "loading" ? "Loading audio" : audioPreview?.status === "playing" ? "Pause audio" : audioPreview?.status === "paused" ? "Resume audio" : "Play audio"}
+            </Button>
+            {audioPreview && audioPreview.status !== "loading" && (
+              <span className="font-mono text-[9px] tabular-nums text-muted-foreground">
+                {formatTimestamp(Math.max(0, audioPreview.currentMs - audioPreview.startMs))} / {formatTimestamp(audioPreview.endMs - audioPreview.startMs)}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="min-w-0">
+        <blockquote className="line-clamp-3 text-[11px] leading-5 text-foreground/85">{item.sampleText ? `“${item.sampleText}”` : "No transcript sample overlaps this voice yet."}</blockquote>
+        <div className="mt-2 font-mono text-[9px] text-muted-foreground">{formatDate(item.mediaCreatedAtMs)} / starts {formatTimestamp(item.firstStartMs)}</div>
+      </div>
+
+      <div className="min-w-0">
+        {suggestion && item.suggestionScore !== null && (
+          <div className="mb-2 flex items-center gap-2 border border-primary/20 bg-primary/5 px-2 py-2">
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[10px] font-semibold">Looks like {suggestion.name}</div>
+              <div className="mt-0.5 font-mono text-[9px] text-muted-foreground">{Math.round(item.suggestionScore * 100)}% pattern match</div>
+            </div>
+            <Button size="sm" className="h-7 px-2 text-[10px]" disabled={busy} onClick={() => void run(() => window.vodSearch.speakers.assignProfile(item.id, suggestion.id))}>Use match</Button>
+          </div>
+        )}
+        <Select value="choose" disabled={busy || profiles.length === 0} onValueChange={(profileId) => { if (profileId !== "choose") void run(() => window.vodSearch.speakers.assignProfile(item.id, profileId)) }}>
+          <SelectTrigger className="h-8 w-full text-xs"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="choose">{profiles.length === 0 ? "No saved speakers yet" : "Choose existing speaker"}</SelectItem>
+            {profiles.map((profile) => <SelectItem key={profile.id} value={profile.id}>{profile.name} / {profile.sampleCount} {profile.sampleCount === 1 ? "sample" : "samples"}</SelectItem>)}
+          </SelectContent>
+        </Select>
+        <form className="mt-2 flex gap-1.5" onSubmit={createProfile}>
+          <Input value={newName} disabled={busy} onChange={(event) => setNewName(event.target.value)} placeholder="Name this speaker" aria-label={`Name ${item.displayName} in ${cleanMediaTitle(item.mediaTitle)}`} className="h-8 min-w-0 text-xs" />
+          <Button type="submit" size="sm" className="h-8" disabled={busy || !newName.trim()}>{busy ? <LoaderCircle className="animate-spin" /> : <UserPlus />}Add</Button>
+        </form>
+      </div>
+    </section>
+  )
+}
+
+function SpeakerReviewEmpty({ title, description }: { title: string; description: string }): React.JSX.Element {
+  return <div className="grid min-h-64 place-items-center border-b px-6 text-center"><div><Users className="mx-auto size-5 text-muted-foreground" /><p className="mt-3 text-xs font-semibold">{title}</p><p className="mt-1 max-w-sm text-[10px] leading-4 text-muted-foreground">{description}</p></div></div>
+}
+
+function speakerInitial(item: SpeakerReviewItem): string {
+  const number = item.diarizationLabel.match(/(\d+)$/)?.[1]
+  return number === undefined ? "?" : String(Number(number) + 1)
+}
+
+function speakerAudioPreviewRange(item: SpeakerReviewItem): [number, number] {
+  const startMs = Math.max(0, item.sampleStartMs - 500)
+  const naturalEndMs = Math.max(item.sampleEndMs + 750, startMs + 4_000)
+  return [startMs, Math.min(naturalEndMs, startMs + 15_000)]
+}
+
+function waitForAudioMetadata(audio: HTMLAudioElement): Promise<void> {
+  if (audio.readyState >= HTMLMediaElement.HAVE_METADATA) return Promise.resolve()
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
+      audio.removeEventListener("loadedmetadata", handleLoaded)
+      audio.removeEventListener("error", handleError)
+    }
+    const handleLoaded = (): void => {
+      cleanup()
+      resolve()
+    }
+    const handleError = (): void => {
+      cleanup()
+      reject(new Error("The audio preview could not be loaded."))
+    }
+    audio.addEventListener("loadedmetadata", handleLoaded)
+    audio.addEventListener("error", handleError)
+  })
+}
+
 function ActivityWorkspace({ jobs, media, stats, processingSchedule, onError }: { jobs: Job[]; media: MediaAsset[]; stats: LibraryStats; processingSchedule: ProcessingSchedule; onError: (error: unknown) => void }): React.JSX.Element {
   const names = useMemo(() => new Map(media.map((item) => [item.id, item.displayName])), [media])
   const active = jobs.filter((job) => ["queued", "running", "paused", "failed"].includes(job.status))
@@ -759,6 +1155,20 @@ function SettingsWorkspace({ folders, models, codex, theme, setTheme, processing
   const [folderToRemove, setFolderToRemove] = useState<SourceFolder | null>(null)
   const [busyFolderId, setBusyFolderId] = useState<string | null>(null)
   const [savingSchedule, setSavingSchedule] = useState<ProcessingScheduleGroup | null>(null)
+  const [speakerEngine, setSpeakerEngine] = useState<SpeakerEngineStatus>({ state: "missing", stage: "idle", error: null })
+  useEffect(() => {
+    let active = true
+    const refresh = async (): Promise<void> => {
+      try {
+        const status = await window.vodSearch.speakers.status()
+        if (active) setSpeakerEngine(status)
+      } catch (error) {
+        if (active) onError(error)
+      }
+    }
+    void refresh()
+    return () => { active = false }
+  }, [onError])
   async function download(modelId: string): Promise<void> { try { await window.vodSearch.models.download(modelId) } catch (error) { onError(error) } finally { await onRefreshModels() } }
   async function runCodex(action: () => Promise<CodexStatus>): Promise<void> { try { await action() } catch (error) { onError(error) } finally { await onRefreshCodex() } }
   async function setFolderSharing(folderId: string, enabled: boolean): Promise<void> { try { await window.vodSearch.library.setFolderSharing(folderId, enabled) } catch (error) { onError(error) } finally { await onRefreshLibrary() } }
@@ -790,13 +1200,20 @@ function SettingsWorkspace({ folders, models, codex, theme, setTheme, processing
         {codex.error && <div className="border-t py-2 text-[10px] text-destructive">{codex.error}</div>}
       </SettingsSection>
 
-      <SettingsSection title="On-device components" description="Local transcription and semantic search models.">
+      <SettingsSection title="On-device components" description="Local transcription, speaker recognition, and semantic search models.">
         {models.map((model) => (
           <SettingRow key={model.modelId} icon={HardDrive} title={modelName(model.modelId)} description={`${modelDescription(model.modelId)} · ${formatBytes(model.sizeBytes)}`}>
             {model.status === "installed" ? <Badge variant="accent"><CheckCircle2 />Installed</Badge> : model.status === "downloading" ? <Button variant="ghost" size="sm" onClick={() => void window.vodSearch.models.cancelDownload(model.modelId)}>Cancel</Button> : <Button variant="outline" size="sm" onClick={() => void download(model.modelId)}>Install</Button>}
           </SettingRow>
         ))}
         {models.some((model) => model.status === "downloading") && <div className="border-t py-2">{models.filter((model) => model.status === "downloading").map((model) => <Progress key={model.modelId} className="h-1" value={model.bytesDownloaded / model.sizeBytes * 100} />)}</div>}
+        <SettingRow icon={Users} title="Sherpa ONNX speaker recognition" description="Bundled local speaker separation and recurring voice matching. No account or setup required.">
+          <Badge variant={speakerEngine.state === "ready" ? "accent" : speakerEngine.state === "error" ? "destructive" : "secondary"}>
+            {speakerEngine.state === "ready" ? <CheckCircle2 /> : null}
+            {speakerEngineLabel(speakerEngine)}
+          </Badge>
+        </SettingRow>
+        {speakerEngine.error && <div className="py-2 text-[10px] text-destructive">{speakerEngine.error}</div>}
       </SettingsSection>
 
       <SettingsSection title="Source folders" description="Shared bundles are imported automatically. Publishing is controlled per folder.">
@@ -820,19 +1237,19 @@ function SettingsWorkspace({ folders, models, codex, theme, setTheme, processing
 
       <SettingsSection title="Processing schedule" description="Daily windows use this computer’s local time. Overnight ranges are supported.">
         <ScheduleSettingRow group="ingestion" title="Ingestion and subtitles" description="Discover files, inspect media, and import available subtitle data." window={processingSchedule.ingestion} busy={savingSchedule === "ingestion"} onChange={(window) => void updateProcessingWindow("ingestion", window)} />
-        <ScheduleSettingRow group="transcription" title="Local transcription" description="Run Whisper for videos that do not already have subtitles." window={processingSchedule.transcription} busy={savingSchedule === "transcription"} onChange={(window) => void updateProcessingWindow("transcription", window)} />
+        <ScheduleSettingRow group="transcription" title="Speech processing" description="Run Whisper when subtitles are missing, then identify speakers locally with Sherpa ONNX." window={processingSchedule.transcription} busy={savingSchedule === "transcription"} onChange={(window) => void updateProcessingWindow("transcription", window)} />
         <ScheduleSettingRow group="summarization" title="AI summaries" description="Send completed transcript text to Codex for topic analysis and summaries." window={processingSchedule.summarization} busy={savingSchedule === "summarization"} onChange={(window) => void updateProcessingWindow("summarization", window)} />
       </SettingsSection>
 
       <SettingsSection title="Preferences" description="Appearance and background resource use.">
         <SettingRow title="Dark appearance" description="Use the dark workspace theme."><Switch checked={theme === "dark"} onCheckedChange={(checked) => setTheme(checked ? "dark" : "light")} /></SettingRow>
-        <SettingRow title="Resource mode" description="Controls the CPU threads available to transcription.">
+        <SettingRow title="Resource mode" description="Controls CPU resources available to local speech processing.">
           <Select defaultValue="normal" onValueChange={(value) => void window.vodSearch.jobs.setResourceMode(value as "low" | "normal" | "high").catch(onError)}><SelectTrigger className="h-8 min-w-40 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="low">Low impact</SelectItem><SelectItem value="normal">Balanced</SelectItem><SelectItem value="high">High performance</SelectItem></SelectContent></Select>
         </SettingRow>
       </SettingsSection>
 
       <SettingsSection title="Storage and privacy" description="How VOD Search handles your data.">
-        <div className="py-3 text-xs leading-5 text-muted-foreground">Videos, transcripts, summaries, embeddings, and the search index remain in local application data. Codex only receives transcript batches when it creates enrichment metadata.</div>
+        <div className="py-3 text-xs leading-5 text-muted-foreground">Videos, transcripts, voice patterns, embeddings, and the search index remain in local application data. Speaker recognition runs entirely on this computer. Codex only receives transcript batches when it creates enrichment metadata.</div>
       </SettingsSection>
       <AlertDialog open={Boolean(folderToRemove)} onOpenChange={(open) => { if (!open) setFolderToRemove(null) }}>
         <AlertDialogContent size="sm">
@@ -1025,4 +1442,11 @@ function modelDescription(modelId: string): string {
 
 function codexStatusLabel(status: CodexStatus): string {
   return ({ checking: "Checking", missing: "Not installed", installing: "Installing", "signed-out": "Sign-in required", "signing-in": "Signing in", ready: "Ready", updating: "Updating", unsupported: "Manual setup required", error: "Needs attention" } as const)[status.state]
+}
+
+function speakerEngineLabel(status: SpeakerEngineStatus): string {
+  if (status.state === "ready") return "Bundled"
+  if (status.state === "missing") return "Build assets missing"
+  if (status.state === "error") return "Needs attention"
+  return "Preparing"
 }

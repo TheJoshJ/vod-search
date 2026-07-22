@@ -1,0 +1,18 @@
+VOD Search bundled speaker-recognition notices
+==============================================
+
+sherpa-onnx
+Copyright (c) the sherpa-onnx contributors.
+Licensed under the Apache License 2.0.
+Source: https://github.com/k2-fsa/sherpa-onnx
+
+pyannote segmentation 3.0 ONNX model
+Copyright (c) 2022 CNRS.
+Licensed under the MIT License.
+Model release: https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-segmentation-models
+Upstream project: https://github.com/pyannote/pyannote-audio
+
+3D-Speaker ERes2Net VoxCeleb speaker-embedding model
+Licensed under the Apache License 2.0.
+Model release: https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models
+Upstream project: https://github.com/modelscope/3D-Speaker

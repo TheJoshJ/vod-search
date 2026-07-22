@@ -27,8 +27,10 @@
 - Shared-folder publishing is explicit and per source; importing compatible shared metadata is automatic.
 - Timeline and transcript timestamps always seek the video directly.
 - The transcript follows playback by highlighting the active segment and scrolling only when it leaves a comfortable reading band.
+- Transcript speaker labels are compact assignment controls; changing one labels the full detected voice cluster without interrupting playback review.
 - Search results lead with matching transcript context, show a synopsis only when it adds distinct information, and collapse equivalent search/summary markers.
 - Search results apply an adaptive confidence cutoff, group matches by video, cluster nearby moments, and disclose lower-confidence matches on request.
+- Clearing a search is an explicit return to All videos; the input clear action, Escape key, and empty submission all restore the indexed-library view.
 - Query-term highlighting is tolerant of light transcription errors but never treats short incidental substrings as matches.
 - A video opened from search keeps the query and previous/next match controls visible; it starts with search markers only and lets the user opt into topic markers.
 - Query-matching transcript rows use a secondary right-edge treatment so they remain distinct from the active playback row.
@@ -38,6 +40,9 @@
 - Native video controls remain available as a reliable playback and scrubbing baseline.
 - Display titles remove file extensions, date prefixes, and source IDs; preserve the original filename or path as secondary detail and hover text.
 - Activity pairs the current queue with compact history, explains each state in plain language, shows useful timing, and exposes only the currently valid Pause or Resume action.
+- Speaker review is a cross-library inbox: show transcript evidence and an exact media timestamp before assignment, then remove confirmed rows immediately.
+- Speaker-review rows keep both paths available: open the full video at the evidence timestamp or play only that detected voice turn inline. Audio previews are exclusive, bounded, and never navigate away from the inbox.
+- Rough-cut planning uses an editorial source-bin and paper-edit layout: source selection stays visible, the brief leads the workflow, and generated cuts remain previewable, reorderable, and removable before export.
 - Source actions live in an overflow menu. Removing a source requires confirmation and removes only the local index, never the user’s media files.
 - Processing schedules use one compact settings row per pipeline phase. Show whether each window is open and its next start; queued Activity rows explain schedule holds in place.
 - Motion is brief and structural; avoid decorative movement.

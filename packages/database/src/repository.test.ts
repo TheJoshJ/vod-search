@@ -189,6 +189,102 @@ describe("Repository", () => {
     }
   })
 
+  it("learns recurring speaker patterns across clips and annotates transcript turns", () => {
+    const database = openDatabase(":memory:")
+    try {
+      const repository = new Repository(database.db)
+      const folder = repository.addSourceFolder("C:\\videos", "C:\\videos")
+      const first = repository.upsertMedia({
+        sourceFolderId: folder.id,
+        relativePath: "first.mp4",
+        canonicalPath: "C:\\videos\\first.mp4",
+        displayName: "first.mp4",
+        sizeBytes: 10,
+        modifiedAtMs: 10,
+        quickFingerprint: "speakers-first"
+      })
+      repository.replaceTranscript(first.id, "whisper", "whisper:first", [
+        { startMs: 0, endMs: 8_000, text: "Primary speaker opens the call." },
+        { startMs: 8_000, endMs: 12_000, text: "The recurring guest joins." }
+      ])
+      repository.replaceSpeakerDiarization(first.id, "community-1:test", [
+        { label: "SPEAKER_00", embedding: [1, 0, 0] },
+        { label: "SPEAKER_01", embedding: [0, 1, 0] }
+      ], [
+        { label: "SPEAKER_00", startMs: 0, endMs: 8_000 },
+        { label: "SPEAKER_01", startMs: 8_000, endMs: 12_000 }
+      ])
+      const firstGuest = repository.getMediaSpeakers(first.id).find((speaker) => speaker.diarizationLabel === "SPEAKER_01")!
+      const guestProfile = repository.createSpeakerProfile(firstGuest.id, "Jamie")
+      expect(repository.listSpeakerProfiles()).toContainEqual(expect.objectContaining({ id: guestProfile.id, sampleCount: 1 }))
+
+      const second = repository.upsertMedia({
+        sourceFolderId: folder.id,
+        relativePath: "second.mp4",
+        canonicalPath: "C:\\videos\\second.mp4",
+        displayName: "second.mp4",
+        sizeBytes: 20,
+        modifiedAtMs: 20,
+        quickFingerprint: "speakers-second"
+      })
+      repository.replaceTranscript(second.id, "whisper", "whisper:second", [
+        { startMs: 0, endMs: 10_000, text: "The primary speaker continues." },
+        { startMs: 10_000, endMs: 14_000, text: "The same guest returns." },
+        { startMs: 20_000, endMs: 24_000, text: "The guest joins again." },
+        { startMs: 30_000, endMs: 34_000, text: "A third voice appears." }
+      ])
+      repository.replaceSpeakerDiarization(second.id, "community-1:test", [
+        { label: "SPEAKER_00", embedding: [1, 0, 0] },
+        { label: "SPEAKER_01", embedding: [0.02, 0.999, 0] },
+        { label: "SPEAKER_02", embedding: [0, 0, 1] }
+      ], [
+        { label: "SPEAKER_00", startMs: 0, endMs: 10_000 },
+        { label: "SPEAKER_01", startMs: 10_000, endMs: 14_000 },
+        { label: "SPEAKER_01", startMs: 20_000, endMs: 24_000 },
+        { label: "SPEAKER_02", startMs: 30_000, endMs: 34_000 }
+      ])
+
+      const secondSpeakers = repository.getMediaSpeakers(second.id)
+      const recurringGuest = secondSpeakers.find((speaker) => speaker.diarizationLabel === "SPEAKER_01")!
+      const thirdSpeaker = secondSpeakers.find((speaker) => speaker.diarizationLabel === "SPEAKER_02")!
+      expect(recurringGuest).toMatchObject({
+        suggestedProfileId: guestProfile.id,
+        turnCount: 2,
+        speechMs: 8_000
+      })
+      expect(thirdSpeaker.suggestedProfileId).toBeNull()
+
+      const reviewQueue = repository.getSpeakerReviewQueue()
+      expect(reviewQueue.profiles).toContainEqual(expect.objectContaining({ id: guestProfile.id, name: "Jamie" }))
+      expect(reviewQueue.items).toContainEqual(expect.objectContaining({
+        id: recurringGuest.id,
+        mediaTitle: "second.mp4",
+        relativePath: "second.mp4",
+        sampleStartMs: 10_000,
+        sampleEndMs: 14_000,
+        sampleText: "The same guest returns.",
+        suggestedProfileId: guestProfile.id
+      }))
+
+      repository.assignMediaSpeakerProfile(recurringGuest.id, guestProfile.id)
+      expect(repository.listSpeakerProfiles()).toContainEqual(expect.objectContaining({ id: guestProfile.id, sampleCount: 2 }))
+      expect(repository.getSpeakerReviewQueue().items.some((item) => item.id === recurringGuest.id)).toBe(false)
+      expect(repository.getMediaSpeakers(second.id).find((speaker) => speaker.id === recurringGuest.id)).toMatchObject({
+        profileId: guestProfile.id,
+        displayName: "Jamie"
+      })
+      expect(repository.getTranscript(second.id).slice(1, 3).map((segment) => segment.mediaSpeakerId)).toEqual([
+        recurringGuest.id,
+        recurringGuest.id
+      ])
+
+      repository.assignMediaSpeakerProfile(recurringGuest.id, null)
+      expect(repository.listSpeakerProfiles()).toContainEqual(expect.objectContaining({ id: guestProfile.id, sampleCount: 1 }))
+    } finally {
+      database.close()
+    }
+  })
+
   it("persists independent processing windows", () => {
     const database = openDatabase(":memory:")
     try {
