@@ -42,15 +42,31 @@ describe("scanSourceFolder", () => {
         includeMissing: false,
         limit: 20
       })
-      expect(response.hits[0]).toMatchObject({ mediaId: media[0]!.id, startMs: 1000 })
+      expect(response.hits[0]).toMatchObject({ mediaId: media[0]!.id, startMs: 21_000 })
 
-      for (const job of repository.listJobs().filter((candidate) => ["embed", "enrich"].includes(candidate.stage))) {
-        repository.updateJob(job.id, { status: "succeeded", progress: 1 })
-      }
+      expect(repository.listJobs().filter((job) => job.stage === "enrich")).toHaveLength(1)
+      expect(repository.listJobs().filter((job) => job.stage === "embed")).toHaveLength(0)
+      const enrichment = repository.listJobs().find((job) => job.stage === "enrich")!
+      repository.updateJob(enrichment.id, { status: "succeeded", progress: 1 })
       await scanSourceFolder(repository, folder.id, root)
-      expect(repository.listJobs().filter((job) => ["embed", "enrich"].includes(job.stage)).every(
-        (job) => job.status === "succeeded"
-      )).toBe(true)
+      expect(repository.listJobs().find((job) => job.stage === "enrich")?.status).toBe("succeeded")
+    } finally {
+      database.close()
+    }
+  })
+
+  it("waits for a successful probe before queueing transcription", async () => {
+    const root = await mkdtemp(join(tmpdir(), "vod-search-scan-"))
+    temporaryPaths.push(root)
+    await writeFile(join(root, "needs-probe.mp4"), Buffer.from("fixture media bytes"))
+
+    const database = openDatabase(":memory:")
+    try {
+      const repository = new Repository(database.db)
+      const folder = repository.addSourceFolder(root, root)
+      await scanSourceFolder(repository, folder.id, root)
+
+      expect(repository.listJobs().map((job) => job.stage)).toEqual(["probe"])
     } finally {
       database.close()
     }

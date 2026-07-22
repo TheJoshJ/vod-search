@@ -44,6 +44,45 @@ describe("Repository", () => {
     }
   })
 
+  it("removes a source and its local search index without affecting other sources", () => {
+    const database = openDatabase(":memory:")
+    try {
+      const repository = new Repository(database.db)
+      const removedFolder = repository.addSourceFolder("C:\\removed", "C:\\removed")
+      const keptFolder = repository.addSourceFolder("C:\\kept", "C:\\kept")
+
+      for (const [folder, name] of [[removedFolder, "removed.mp4"], [keptFolder, "kept.mp4"]] as const) {
+        const media = repository.upsertMedia({
+          sourceFolderId: folder.id,
+          relativePath: name,
+          canonicalPath: `${folder.path}\\${name}`,
+          displayName: name,
+          sizeBytes: 100,
+          modifiedAtMs: 100,
+          quickFingerprint: `fixture-${name}`
+        })
+        repository.replaceChunks(media.id, "chunk-v1", [{
+          startMs: 0,
+          endMs: 10_000,
+          transcript: `unique searchable phrase ${name}`
+        }])
+      }
+
+      repository.removeSourceFolder(removedFolder.id)
+
+      expect(repository.listSourceFolders().map((folder) => folder.id)).toEqual([keptFolder.id])
+      expect(repository.listMedia({ offset: 0, limit: 20 }).map((media) => media.displayName)).toEqual(["kept.mp4"])
+      expect(new SearchService(repository).search({
+        query: "unique searchable phrase",
+        mode: "keyword",
+        includeMissing: false,
+        limit: 20
+      }).hits.map((hit) => hit.title)).toEqual(["kept.mp4"])
+    } finally {
+      database.close()
+    }
+  })
+
   it("filters timestamp results by the media creation date", () => {
     const database = openDatabase(":memory:")
     try {
@@ -103,14 +142,10 @@ describe("Repository", () => {
         modifiedAtMs: 100,
         quickFingerprint: "summary-fixture"
       })
-      repository.replaceChunks(media.id, "chunk-v1", [{
+      repository.replaceChunksWithTopics(media.id, [{
         startMs: 10_000,
         endMs: 20_000,
-        transcript: "The player changes strategy."
-      }])
-      const chunk = repository.getChunksForEmbedding(media.id)[0]!
-      repository.applyEnrichments(media.id, [{
-        chunkId: chunk.id,
+        transcript: "The player changes strategy.",
         summary: "A defensive strategy change stabilizes the attempt.",
         entities: [{ name: "Kalphite King", type: "boss" }],
         events: [{ type: "strategy_change", subject: "player", object: null, confidence: 0.96 }],
@@ -149,6 +184,182 @@ describe("Repository", () => {
       expect(repository.claimNextJob()?.status).toBe("running")
       expect(repository.recoverRunningJobs()).toBe(1)
       expect(repository.listJobs()[0]?.status).toBe("queued")
+    } finally {
+      database.close()
+    }
+  })
+
+  it("persists independent processing windows", () => {
+    const database = openDatabase(":memory:")
+    try {
+      const repository = new Repository(database.db)
+      expect(repository.getProcessingSchedule().transcription.enabled).toBe(false)
+
+      const saved = repository.setProcessingSchedule({
+        ingestion: { enabled: true, startMinute: 8 * 60, endMinute: 12 * 60 },
+        transcription: { enabled: true, startMinute: 22 * 60, endMinute: 7 * 60 },
+        summarization: { enabled: true, startMinute: 1 * 60, endMinute: 5 * 60 }
+      })
+
+      expect(repository.getProcessingSchedule()).toEqual(saved)
+    } finally {
+      database.close()
+    }
+  })
+
+  it("preserves failed jobs during routine enqueue and retries them only when requested", () => {
+    const database = openDatabase(":memory:")
+    try {
+      const repository = new Repository(database.db)
+      const folder = repository.addSourceFolder("C:\\videos", "C:\\videos")
+      const media = repository.upsertMedia({
+        sourceFolderId: folder.id,
+        relativePath: "broken.mkv",
+        canonicalPath: "C:\\videos\\broken.mkv",
+        displayName: "broken.mkv",
+        sizeBytes: 810,
+        modifiedAtMs: 1,
+        quickFingerprint: "broken-fixture"
+      })
+      const job = repository.enqueueJob(media.id, "probe")
+      repository.updateJob(job.id, { status: "failed", error: "End of file" })
+
+      expect(repository.enqueueJob(media.id, "probe").status).toBe("failed")
+      expect(repository.retryJob(job.id)).toMatchObject({ status: "queued", progress: 0, error: null })
+    } finally {
+      database.close()
+    }
+  })
+
+  it("queues Codex enrichment before BGE embedding and invalidates stale vectors", () => {
+    const database = openDatabase(":memory:")
+    try {
+      const repository = new Repository(database.db)
+      const folder = repository.addSourceFolder("C:\\videos", "C:\\videos")
+      const media = repository.upsertMedia({
+        sourceFolderId: folder.id,
+        relativePath: "clip.mp4",
+        canonicalPath: "C:\\videos\\clip.mp4",
+        displayName: "clip.mp4",
+        sizeBytes: 10,
+        modifiedAtMs: 10,
+        quickFingerprint: "model-job-fixture"
+      })
+      repository.replaceChunks(media.id, "chunk-v1", [{
+        startMs: 0,
+        endMs: 10_000,
+        transcript: "searchable words"
+      }])
+
+      expect(repository.ensureEnrichmentJobs()).toBe(1)
+      expect(repository.listJobs().find((job) => job.stage === "enrich")?.status).toBe("queued")
+      expect(repository.ensureEmbeddingJobs()).toBe(0)
+
+      repository.enqueueJob(media.id, "embed")
+      expect(repository.cancelEmbeddingsBlockedByEnrichment()).toBe(1)
+      expect(repository.listJobs().find((job) => job.stage === "embed")?.status).toBe("cancelled")
+      const chunk = repository.getChunksForEmbedding(media.id)[0]!
+      const enrichment = {
+        chunkId: chunk.id,
+        summary: "The speaker says searchable words.",
+        entities: [],
+        events: [],
+        aliases: [],
+        searchPhrases: ["searchable words"],
+        confidence: 0.99
+      }
+      repository.applyEnrichments(media.id, [enrichment], "codex-fixture-v1")
+      expect(repository.isEnrichmentComplete(media.id)).toBe(true)
+      expect(repository.isEnrichmentComplete(media.id, "codex-fixture-v1")).toBe(true)
+      expect(repository.isEnrichmentComplete(media.id, "codex-fixture-v2")).toBe(false)
+      expect(repository.ensureEmbeddingJobs()).toBe(1)
+      expect(repository.listJobs().find((job) => job.stage === "embed")?.status).toBe("queued")
+
+      const vector = new Float32Array(384)
+      vector[0] = 1
+      repository.storeEmbeddings([{ chunkId: chunk.id, embedding: vector }], "bge-fixture-v1")
+      const embeddingJob = repository.listJobs().find((job) => job.stage === "embed")!
+      repository.updateJob(embeddingJob.id, { status: "succeeded", progress: 1 })
+      expect(repository.semanticSearch(vector, false, 10)).toHaveLength(1)
+      expect(repository.ensureEmbeddingJobs("codex-fixture-v1", "bge-fixture-v1")).toBe(0)
+      expect(repository.ensureEmbeddingJobs("codex-fixture-v1", "bge-fixture-v2")).toBe(1)
+      repository.updateJob(embeddingJob.id, { status: "succeeded", progress: 1 })
+
+      repository.applyEnrichments(media.id, [{
+        ...enrichment,
+        summary: "A revised Codex summary."
+      }], "codex-fixture-v2")
+      expect(repository.semanticSearch(vector, false, 10)).toHaveLength(0)
+      expect(repository.ensureEmbeddingJobs()).toBe(1)
+      expect(repository.listJobs().find((job) => job.stage === "embed")?.status).toBe("queued")
+
+    } finally {
+      database.close()
+    }
+  })
+
+  it("requeues topic analysis when the Codex prompt version changes", () => {
+    const database = openDatabase(":memory:")
+    try {
+      const repository = new Repository(database.db)
+      const folder = repository.addSourceFolder("C:\\videos", "C:\\videos")
+      const media = repository.upsertMedia({
+        sourceFolderId: folder.id,
+        relativePath: "versioned.mp4",
+        canonicalPath: "C:\\videos\\versioned.mp4",
+        displayName: "versioned.mp4",
+        sizeBytes: 10,
+        modifiedAtMs: 10,
+        quickFingerprint: "versioned-enrichment-fixture"
+      })
+      repository.replaceChunks(media.id, "chunk-v1", [{
+        startMs: 0,
+        endMs: 10_000,
+        transcript: "A complete thought."
+      }])
+      expect(repository.ensureEnrichmentJobs("topic-prompt-v1")).toBe(1)
+      const enrichmentJob = repository.listJobs().find((job) => job.stage === "enrich")!
+      const chunk = repository.getChunksForEmbedding(media.id)[0]!
+      repository.applyEnrichments(media.id, [{
+        chunkId: chunk.id,
+        summary: "The speaker expresses a complete thought.",
+        entities: [],
+        events: [],
+        aliases: [],
+        searchPhrases: ["complete thought"],
+        confidence: 0.95
+      }], "topic-prompt-v1")
+      repository.updateJob(enrichmentJob.id, { status: "succeeded", progress: 1 })
+
+      expect(repository.ensureEnrichmentJobs("topic-prompt-v1")).toBe(0)
+      expect(repository.ensureEnrichmentJobs("topic-prompt-v2")).toBe(1)
+      expect(repository.getJob(enrichmentJob.id).status).toBe("queued")
+      expect(repository.ensureEmbeddingJobs("topic-prompt-v2")).toBe(0)
+    } finally {
+      database.close()
+    }
+  })
+
+  it("cancels transcription when its required probe failed", () => {
+    const database = openDatabase(":memory:")
+    try {
+      const repository = new Repository(database.db)
+      const folder = repository.addSourceFolder("C:\\videos", "C:\\videos")
+      const media = repository.upsertMedia({
+        sourceFolderId: folder.id,
+        relativePath: "broken.mp4",
+        canonicalPath: "C:\\videos\\broken.mp4",
+        displayName: "broken.mp4",
+        sizeBytes: 10,
+        modifiedAtMs: 10,
+        quickFingerprint: "failed-probe-fixture"
+      })
+
+      const probe = repository.enqueueJob(media.id, "probe")
+      repository.updateJob(probe.id, { status: "failed", error: "corrupt input" })
+      repository.enqueueJob(media.id, "transcribe")
+      expect(repository.cancelTranscriptionsBlockedByFailedProbe()).toBe(1)
+      expect(repository.listJobs().find((job) => job.stage === "transcribe")?.status).toBe("cancelled")
     } finally {
       database.close()
     }

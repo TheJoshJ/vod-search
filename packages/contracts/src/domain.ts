@@ -41,6 +41,7 @@ export const sourceFolderSchema = z.object({
   path: z.string(),
   addedAtMs: z.number().int().nonnegative(),
   lastScanAtMs: z.number().int().nonnegative().nullable(),
+  publishSharedMetadata: z.boolean(),
   availableMediaCount: z.number().int().nonnegative(),
   missingMediaCount: z.number().int().nonnegative()
 })
@@ -113,6 +114,17 @@ export const enrichedChunkSchema = z.object({
   confidence: z.number().min(0).max(1)
 })
 export type EnrichedChunk = z.infer<typeof enrichedChunkSchema>
+
+export const transcriptTopicSchema = z.object({
+  startSegmentId: z.number().int().nonnegative(),
+  summary: z.string().min(1).max(640),
+  entities: z.array(enrichmentEntitySchema).max(20),
+  events: z.array(enrichmentEventSchema).max(20),
+  aliases: z.array(z.string().min(1).max(80)).max(30),
+  searchPhrases: z.array(z.string().min(1).max(160)).max(20),
+  confidence: z.number().min(0).max(1)
+})
+export type TranscriptTopic = z.infer<typeof transcriptTopicSchema>
 
 export const jobSchema = z.object({
   id: z.string(),

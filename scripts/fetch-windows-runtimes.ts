@@ -18,6 +18,7 @@ interface RuntimeArchive {
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const cacheRoot = join(projectRoot, ".cache", "runtimes")
 const runtimeRoot = join(projectRoot, "resources", "runtime", "windows")
+const obsoleteRuntimeIds = ["llama-cpu", "llama-vulkan"]
 
 const archives: RuntimeArchive[] = [
   {
@@ -38,6 +39,9 @@ const archives: RuntimeArchive[] = [
 
 await mkdir(cacheRoot, { recursive: true })
 await mkdir(runtimeRoot, { recursive: true })
+for (const runtimeId of obsoleteRuntimeIds) {
+  await rm(join(runtimeRoot, runtimeId), { recursive: true, force: true })
+}
 
 for (const archive of archives) {
   const targetPath = join(runtimeRoot, archive.id)

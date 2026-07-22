@@ -9,9 +9,12 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test": "vitest run",
+    "test:search:hybrid": "pnpm --filter @vod-search/desktop exec electron ../../scripts/evaluate-live-hybrid-search.cjs",
+    "test:search:live": "pnpm --filter @vod-search/desktop exec electron ../../scripts/evaluate-live-search.cjs",
     "test:watch": "vitest",
     "prepare:runtimes:win": "tsx scripts/fetch-windows-runtimes.ts",
-    "package:win": "pnpm prepare:runtimes:win && pnpm --filter @vod-search/desktop package:win"
+    "package:win": "pnpm prepare:runtimes:win && pnpm --filter @vod-search/desktop package:win",
+    "release:win": "pnpm prepare:runtimes:win && pnpm --filter @vod-search/desktop release:win"
   },
   "devDependencies": {
     "@types/node": "26.1.1",

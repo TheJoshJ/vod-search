@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { join } from "node:path"
 import { utilityProcess, type UtilityProcess } from "electron"
+import type { CodexCommandBinding } from "./codex-manager.js"
 
 interface RpcRequest {
   type: "request"
@@ -31,7 +32,13 @@ export class IndexerClient {
   }>()
   private readonly listeners = new Map<string, Set<(payload: unknown) => void>>()
 
-  async start(databasePath: string, modelsPath: string, resourcesPath: string, managedCodexPath: string): Promise<void> {
+  async start(
+    databasePath: string,
+    modelsPath: string,
+    resourcesPath: string,
+    managedCodexPath: string,
+    codexBinding: CodexCommandBinding | null
+  ): Promise<void> {
     if (this.child) return
     const entry = join(__dirname, "indexer.js")
     const child = utilityProcess.fork(entry, [], {
@@ -41,7 +48,9 @@ export class IndexerClient {
         VOD_SEARCH_DB_PATH: databasePath,
         VOD_SEARCH_MODELS_PATH: modelsPath,
         VOD_SEARCH_RESOURCES_PATH: resourcesPath,
-        VOD_SEARCH_CODEX_MANAGED_PATH: managedCodexPath
+        VOD_SEARCH_CODEX_MANAGED_PATH: managedCodexPath,
+        VOD_SEARCH_CODEX_PATH: codexBinding?.executablePath,
+        VOD_SEARCH_CODEX_PREFIX_ARGS: codexBinding ? JSON.stringify(codexBinding.prefixArgs) : undefined
       },
       stdio: "pipe"
     })

@@ -23,10 +23,14 @@ export default defineConfig({
     }
   },
   preload: {
-    plugins: [externalizeDepsPlugin({ exclude: ["@vod-search/contracts"] })],
+    plugins: [externalizeDepsPlugin({ exclude: ["@vod-search/contracts", "zod"] })],
     build: {
       rollupOptions: {
-        input: resolve("src/preload/index.ts")
+        input: resolve("src/preload/index.ts"),
+        output: {
+          entryFileNames: "[name].cjs",
+          format: "cjs"
+        }
       }
     }
   },

@@ -4,6 +4,10 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: write
 
 jobs:
   package:
@@ -21,7 +25,22 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
-      - run: pnpm package:win
+      - name: Verify release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $packageVersion = (Get-Content apps/desktop/package.json | ConvertFrom-Json).version
+          if ("v$packageVersion" -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} must match desktop package version v$packageVersion"
+          }
+      - name: Build installer artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: pnpm package:win
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: pnpm release:win
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/upload-artifact@v4
         with:
           name: vod-search-windows

@@ -163,6 +163,13 @@ const migrations: Migration[] = [
       UPDATE media_assets SET created_at_ms = modified_at_ms WHERE created_at_ms IS NULL;
       CREATE INDEX media_assets_created_at_idx ON media_assets(created_at_ms DESC);
     `
+  },
+  {
+    version: 3,
+    name: "shared_source_metadata",
+    sql: `
+      ALTER TABLE source_folders ADD COLUMN publish_shared_metadata INTEGER NOT NULL DEFAULT 0;
+    `
   }
 ]
 

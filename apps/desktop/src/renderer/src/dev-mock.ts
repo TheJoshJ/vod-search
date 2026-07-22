@@ -5,6 +5,7 @@ import type {
   MediaAsset,
   MediaDetail,
   ModelInstallation,
+  ProcessingSchedule,
   SearchHit,
   SourceFolder,
   VodSearchApi
@@ -16,6 +17,7 @@ const sourceFolder: SourceFolder = {
   path: "D:\\Capture Archive\\RuneScape",
   addedAtMs: now - 1000 * 60 * 60 * 24 * 180,
   lastScanAtMs: now - 1000 * 60 * 4,
+  publishSharedMetadata: true,
   availableMediaCount: 9,
   missingMediaCount: 0
 }
@@ -84,6 +86,12 @@ const stats: LibraryStats = {
   failedJobs: 0
 }
 
+let processingSchedule: ProcessingSchedule = {
+  ingestion: { enabled: false, startMinute: 8 * 60, endMinute: 22 * 60 },
+  transcription: { enabled: false, startMinute: 22 * 60, endMinute: 7 * 60 },
+  summarization: { enabled: false, startMinute: 22 * 60, endMinute: 7 * 60 }
+}
+
 export function createDevMockApi(): VodSearchApi {
   return {
     library: {
@@ -91,16 +99,26 @@ export function createDevMockApi(): VodSearchApi {
       addFolder: async () => sourceFolder,
       listFolders: async () => [sourceFolder],
       listMedia: async (input) => media.slice(input?.offset ?? 0, (input?.offset ?? 0) + (input?.limit ?? 100)),
-      stats: async () => stats
+      stats: async () => stats,
+      setFolderSharing: async (_folderId, publishSharedMetadata) => ({ ...sourceFolder, publishSharedMetadata }),
+      rescanFolder: async () => undefined,
+      revealFolder: async () => undefined,
+      removeFolder: async () => undefined
     },
     search: {
       query: async () => ({ hits, elapsedMs: 38, indexedChunkCount: stats.searchableChunks })
     },
     jobs: {
       list: async () => jobs,
+      retry: async () => undefined,
       pauseAll: async () => undefined,
       resumeAll: async () => undefined,
-      setResourceMode: async () => undefined
+      setResourceMode: async () => undefined,
+      getProcessingSchedule: async () => processingSchedule,
+      setProcessingSchedule: async (schedule) => {
+        processingSchedule = schedule
+        return processingSchedule
+      }
     },
     models: {
       list: async () => models,
@@ -114,7 +132,11 @@ export function createDevMockApi(): VodSearchApi {
     },
     media: {
       getPlaybackSource: async () => ({ url: "", available: false }),
-      getDetail: async (mediaId) => detailFor(media.find((item) => item.id === mediaId) ?? media[0]!)
+      getDetail: async (mediaId) => detailFor(media.find((item) => item.id === mediaId) ?? media[0]!),
+      revealInExplorer: async () => undefined,
+      openExternal: async () => ({ mode: "default-player", playerName: null }),
+      openExternalAt: async () => ({ mode: "generated-clip", playerName: null }),
+      exportClip: async () => ({ path: "D:\\Capture Archive\\clip.mp4" })
     },
     events: {
       onLibraryChanged: () => () => undefined,
@@ -139,7 +161,14 @@ function createHit(item: MediaAsset, startMs: number, endMs: number, summary: st
     events: ["player_death"],
     availability: "available",
     matchReasons: ["semantic", "transcript"],
-    score: 0.91
+    score: 82,
+    scoreBreakdown: {
+      semantic: 31,
+      lexical: 12,
+      transcript: 39,
+      summary: 0,
+      metadata: 0
+    }
   }
 }
 

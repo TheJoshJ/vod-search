@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process"
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { isAbsolute, join, resolve } from "node:path"
+import { dirname, isAbsolute, join, resolve } from "node:path"
 import type { CodexStatus } from "@vod-search/contracts"
 
 const installerUrl = "https://chatgpt.com/codex/install.ps1"
@@ -10,6 +10,11 @@ interface CommandResult {
   stdout: string
   stderr: string
   exitCode: number
+}
+
+export interface CodexCommandBinding {
+  executablePath: string
+  prefixArgs: string[]
 }
 
 type ActiveState = "installing" | "updating" | "signing-in"
@@ -25,6 +30,10 @@ export class CodexManager {
 
   get managedExecutablePath(): string {
     return join(this.installDirectory, process.platform === "win32" ? "codex.exe" : "codex")
+  }
+
+  async getIndexerBinding(): Promise<CodexCommandBinding | null> {
+    return this.resolveCommand()
   }
 
   async status(): Promise<CodexStatus> {
@@ -88,13 +97,18 @@ export class CodexManager {
 
   async login(): Promise<CodexStatus> {
     this.assertIdle()
-    const executable = await this.resolveExecutable()
-    if (!executable) throw new Error("Install Codex before signing in")
+    const command = await this.resolveCommand()
+    if (!command) throw new Error("Install Codex before signing in")
     this.activeState = "signing-in"
     this.lastError = null
     this.onChanged()
     try {
-      const result = await runCommand(executable, ["login"], process.env, 10 * 60_000)
+      const result = await runCommand(
+        command.executablePath,
+        [...command.prefixArgs, "login"],
+        process.env,
+        10 * 60_000
+      )
       if (result.exitCode !== 0) throw commandError("Codex sign-in", result)
       this.activeState = null
       const next = await this.probe()
@@ -114,36 +128,80 @@ export class CodexManager {
   }
 
   private async probe(): Promise<Omit<CodexStatus, "state" | "error">> {
-    const executable = await this.resolveExecutable()
-    if (!executable) {
+    const command = await this.resolveCommand()
+    if (!command) {
       return { installed: false, authenticated: false, version: null, managed: false }
     }
-    const versionResult = await runCommand(executable, ["--version"], process.env, 30_000)
+    const versionResult = await runCommand(
+      command.executablePath,
+      [...command.prefixArgs, "--version"],
+      process.env,
+      30_000
+    )
     if (versionResult.exitCode !== 0) {
       return { installed: false, authenticated: false, version: null, managed: false }
     }
     const rawVersion = versionResult.stdout.trim()
     const version = rawVersion.match(/([0-9]+\.[0-9]+\.[0-9]+(?:[-+][^\s]+)?)$/)?.[1] ?? (rawVersion || null)
-    const authResult = await runCommand(executable, ["login", "status"], process.env, 30_000)
+    const authResult = await runCommand(
+      command.executablePath,
+      [...command.prefixArgs, "login", "status"],
+      process.env,
+      30_000
+    )
     return {
       installed: true,
       authenticated: authResult.exitCode === 0,
       version,
-      managed: normalizePath(executable) === normalizePath(this.managedExecutablePath)
+      managed: normalizePath(command.executablePath) === normalizePath(this.managedExecutablePath)
     }
   }
 
-  private async resolveExecutable(): Promise<string | null> {
+  private async resolveCommand(): Promise<CodexCommandBinding | null> {
     const override = process.env.VOD_SEARCH_CODEX_PATH
-    if (override && await pathExists(override)) return override
-    if (await pathExists(this.managedExecutablePath)) return this.managedExecutablePath
+    if (override && await pathExists(override)) return { executablePath: override, prefixArgs: [] }
+    if (await pathExists(this.managedExecutablePath)) {
+      return { executablePath: this.managedExecutablePath, prefixArgs: [] }
+    }
+
+    if (process.platform === "win32") {
+      const npmBinding = await resolveNpmCodexBinding()
+      if (npmBinding) return npmBinding
+    }
 
     const finder = process.platform === "win32" ? "where.exe" : "which"
     const result = await runCommand(finder, [process.platform === "win32" ? "codex.exe" : "codex"], process.env, 10_000)
     if (result.exitCode !== 0) return null
     const first = result.stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean)
-    return first ? resolve(first) : null
+    return first ? { executablePath: resolve(first), prefixArgs: [] } : null
   }
+}
+
+async function resolveNpmCodexBinding(): Promise<CodexCommandBinding | null> {
+  const shimResult = await runCommand("where.exe", ["codex.cmd"], process.env, 10_000)
+  if (shimResult.exitCode !== 0) return null
+  const nodeResult = await runCommand("where.exe", ["node.exe"], process.env, 10_000)
+  const nodePaths = nodeResult.exitCode === 0
+    ? nodeResult.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+    : []
+  for (const shimPath of shimResult.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)) {
+    const directory = dirname(shimPath)
+    const cliPath = join(directory, "node_modules", "@openai", "codex", "bin", "codex.js")
+    if (!await pathExists(cliPath)) continue
+    const adjacentNodePath = join(directory, "node.exe")
+    let nodePath: string | undefined
+    if (await pathExists(adjacentNodePath)) nodePath = adjacentNodePath
+    else {
+      for (const candidate of nodePaths) {
+        if (isAbsolute(candidate) && await pathExists(candidate)) {
+          nodePath = candidate
+          break
+        }
+      }
+    }
+    if (nodePath) return { executablePath: nodePath, prefixArgs: [cliPath] }
+  }
+  return null
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -168,11 +226,26 @@ function runCommand(
   timeoutMs: number
 ): Promise<CommandResult> {
   return new Promise((resolveCommand) => {
-    const child = spawn(executable, args, {
-      env,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"]
-    })
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(executable, args, {
+        env,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"]
+      })
+    } catch (error) {
+      resolveCommand({
+        stdout: "",
+        stderr: error instanceof Error ? error.message : String(error),
+        exitCode: -1
+      })
+      return
+    }
+    if (!child.stdout || !child.stderr) {
+      child.kill()
+      resolveCommand({ stdout: "", stderr: "The Codex process did not expose output streams", exitCode: -1 })
+      return
+    }
     let stdout = ""
     let stderr = ""
     let settled = false

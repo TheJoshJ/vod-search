@@ -15,19 +15,28 @@ function subscribe(channel: string, listener: () => void): () => void {
 const api: VodSearchApi = {
   library: {
     selectFolder: () => ipcRenderer.invoke(ipcChannels.librarySelectFolder),
-    addFolder: (path) => ipcRenderer.invoke(ipcChannels.libraryAddFolder, { path }),
+    addFolder: (path, publishSharedMetadata = false) =>
+      ipcRenderer.invoke(ipcChannels.libraryAddFolder, { path, publishSharedMetadata }),
     listFolders: () => ipcRenderer.invoke(ipcChannels.libraryListFolders),
     listMedia: (input = {}) => ipcRenderer.invoke(ipcChannels.libraryListMedia, input),
-    stats: () => ipcRenderer.invoke(ipcChannels.libraryStats)
+    stats: () => ipcRenderer.invoke(ipcChannels.libraryStats),
+    setFolderSharing: (folderId, publishSharedMetadata) =>
+      ipcRenderer.invoke(ipcChannels.librarySetFolderSharing, { folderId, publishSharedMetadata }),
+    rescanFolder: (folderId) => ipcRenderer.invoke(ipcChannels.libraryRescanFolder, { folderId }),
+    revealFolder: (folderId) => ipcRenderer.invoke(ipcChannels.libraryRevealFolder, { folderId }),
+    removeFolder: (folderId) => ipcRenderer.invoke(ipcChannels.libraryRemoveFolder, { folderId })
   },
   search: {
     query: (input: SearchRequest) => ipcRenderer.invoke(ipcChannels.searchQuery, input)
   },
   jobs: {
     list: () => ipcRenderer.invoke(ipcChannels.jobsList),
+    retry: (jobId) => ipcRenderer.invoke(ipcChannels.jobsRetry, { jobId }),
     pauseAll: () => ipcRenderer.invoke(ipcChannels.jobsPauseAll),
     resumeAll: () => ipcRenderer.invoke(ipcChannels.jobsResumeAll),
-    setResourceMode: (mode: ResourceMode) => ipcRenderer.invoke(ipcChannels.jobsSetResourceMode, mode)
+    setResourceMode: (mode: ResourceMode) => ipcRenderer.invoke(ipcChannels.jobsSetResourceMode, mode),
+    getProcessingSchedule: () => ipcRenderer.invoke(ipcChannels.jobsGetProcessingSchedule),
+    setProcessingSchedule: (schedule) => ipcRenderer.invoke(ipcChannels.jobsSetProcessingSchedule, schedule)
   },
   models: {
     list: () => ipcRenderer.invoke(ipcChannels.modelsList),
@@ -41,7 +50,11 @@ const api: VodSearchApi = {
   },
   media: {
     getPlaybackSource: (mediaId) => ipcRenderer.invoke(ipcChannels.mediaPlaybackSource, { mediaId }),
-    getDetail: (mediaId) => ipcRenderer.invoke(ipcChannels.mediaDetail, mediaId)
+    getDetail: (mediaId) => ipcRenderer.invoke(ipcChannels.mediaDetail, mediaId),
+    revealInExplorer: (mediaId) => ipcRenderer.invoke(ipcChannels.mediaRevealInExplorer, { mediaId }),
+    openExternal: (mediaId) => ipcRenderer.invoke(ipcChannels.mediaOpenExternal, { mediaId }),
+    openExternalAt: (mediaId, startMs) => ipcRenderer.invoke(ipcChannels.mediaOpenExternalAt, { mediaId, startMs }),
+    exportClip: (mediaId, startMs, endMs) => ipcRenderer.invoke(ipcChannels.mediaExportClip, { mediaId, startMs, endMs })
   },
   events: {
     onLibraryChanged: (listener) => subscribe(ipcChannels.eventLibraryChanged, listener),

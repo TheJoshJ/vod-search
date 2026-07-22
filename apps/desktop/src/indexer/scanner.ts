@@ -3,6 +3,7 @@ import { open, readFile, readdir, realpath, stat } from "node:fs/promises"
 import { basename, dirname, extname, relative, resolve } from "node:path"
 import type { Repository } from "@vod-search/database"
 import { chunkTranscript, parseSubtitle } from "@vod-search/search"
+import { importSharedMetadata } from "./shared-metadata.js"
 
 const mediaExtensions = new Set([".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts"])
 const subtitleExtensions = [".srt", ".vtt", ".ass"] as const
@@ -62,8 +63,11 @@ export async function scanSourceFolder(
       if (subtitlePath) {
         await indexSidecar(repository, media.id, subtitlePath)
         repository.cancelJob(media.id, "transcribe")
-      } else {
-        repository.enqueueJob(media.id, "transcribe", Math.round(fileStat.mtimeMs / 1000))
+      }
+      try {
+        await importSharedMetadata(repository, media.id, canonicalRoot)
+      } catch (error) {
+        console.warn(`Shared VOD Search metadata could not be imported for ${canonicalPath}:`, error)
       }
       callbacks.onProgress?.(index + 1)
       callbacks.onMediaIndexed?.()
@@ -87,7 +91,6 @@ async function indexSidecar(repository: Repository, mediaId: string, subtitlePat
   repository.setMediaStage(mediaId, "subtitled")
   const chunks = chunkTranscript(segments)
   repository.replaceChunks(mediaId, "chunk-v1", chunks)
-  repository.requeueJob(mediaId, "embed")
   repository.requeueJob(mediaId, "enrich")
 }
 

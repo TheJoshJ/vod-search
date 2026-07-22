@@ -1,23 +1,31 @@
-import { join } from "node:path"
-import { pathToFileURL } from "node:url"
+import { basename, dirname, extname, join, resolve } from "node:path"
 import {
   app,
   BrowserWindow,
   dialog,
   ipcMain,
-  net,
   powerMonitor,
-  protocol
+  protocol,
+  shell
 } from "electron"
 import {
   ipcChannels,
   listMediaRequestSchema,
+  mediaExportClipRequestSchema,
+  mediaExternalOpenRequestSchema,
   mediaPlaybackRequestSchema,
+  processingScheduleSchema,
   resourceModeSchema,
-  searchRequestSchema
+  retryJobRequestSchema,
+  searchRequestSchema,
+  setFolderSharingRequestSchema,
+  sourceFolderRequestSchema
 } from "@vod-search/contracts"
 import { IndexerClient } from "./indexer-client.js"
 import { CodexManager } from "./codex-manager.js"
+import { serveMediaFile } from "./media-protocol.js"
+import { exportMediaClip, openMediaAtTimestamp } from "./external-media.js"
+import { registerAutoUpdates } from "./auto-update.js"
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -34,6 +42,7 @@ let codex: CodexManager | null = null
 let mainWindow: BrowserWindow | null = null
 let manuallyPaused = false
 let pausedForBattery = false
+let runtimeResourcesPath = ""
 
 app.whenReady().then(async () => {
   codex = new CodexManager(
@@ -43,16 +52,23 @@ app.whenReady().then(async () => {
       void indexer.request("codex:refresh").catch(() => undefined)
     }
   )
+  const resourcesPath = app.isPackaged
+    ? process.resourcesPath
+    : resolve(__dirname, "../../../..", "resources")
+  runtimeResourcesPath = resourcesPath
   await indexer.start(
     join(app.getPath("userData"), "index", "vod-search.db"),
     join(app.getPath("userData"), "models"),
-    app.isPackaged ? process.resourcesPath : join(app.getAppPath(), "..", "..", "resources"),
-    codex.managedExecutablePath
+    resourcesPath,
+    codex.managedExecutablePath,
+    await codex.getIndexerBinding()
   )
   registerProtocol()
   registerIpc()
   registerPowerControls()
   createWindow()
+  const stopAutoUpdates = registerAutoUpdates(app.isPackaged, () => mainWindow)
+  app.once("will-quit", stopAutoUpdates)
 
   indexer.on("library-changed", () => broadcast(ipcChannels.eventLibraryChanged))
   indexer.on("jobs-changed", () => broadcast(ipcChannels.eventJobsChanged))
@@ -78,7 +94,7 @@ function createWindow(): void {
     show: false,
     title: "VOD Search",
     webPreferences: {
-      preload: join(__dirname, "../preload/index.mjs"),
+      preload: join(__dirname, "../preload/index.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -102,9 +118,29 @@ function registerIpc(): void {
   ipcMain.handle(ipcChannels.libraryListMedia, (_event, payload) =>
     indexer.request("library:list-media", listMediaRequestSchema.parse(payload ?? {})))
   ipcMain.handle(ipcChannels.libraryStats, () => indexer.request("library:stats"))
+  ipcMain.handle(ipcChannels.librarySetFolderSharing, (_event, payload) =>
+    indexer.request("library:set-folder-sharing", setFolderSharingRequestSchema.parse(payload)))
+  ipcMain.handle(ipcChannels.libraryRescanFolder, (_event, payload) => {
+    const { folderId } = sourceFolderRequestSchema.parse(payload)
+    return indexer.request("library:rescan", folderId)
+  })
+  ipcMain.handle(ipcChannels.libraryRevealFolder, async (_event, payload) => {
+    const { folderId } = sourceFolderRequestSchema.parse(payload)
+    const folder = await indexer.request<{ path: string }>("library:get-folder", folderId)
+    const openError = await shell.openPath(folder.path)
+    if (openError) throw new Error(openError)
+  })
+  ipcMain.handle(ipcChannels.libraryRemoveFolder, (_event, payload) => {
+    const { folderId } = sourceFolderRequestSchema.parse(payload)
+    return indexer.request("library:remove-folder", folderId)
+  })
   ipcMain.handle(ipcChannels.searchQuery, (_event, payload) =>
     indexer.request("search:query", searchRequestSchema.parse(payload)))
   ipcMain.handle(ipcChannels.jobsList, () => indexer.request("jobs:list"))
+  ipcMain.handle(ipcChannels.jobsRetry, (_event, payload) => {
+    const { jobId } = retryJobRequestSchema.parse(payload)
+    return indexer.request("jobs:retry", jobId)
+  })
   ipcMain.handle(ipcChannels.jobsPauseAll, async () => {
     manuallyPaused = true
     await indexer.request("jobs:pause-all")
@@ -116,6 +152,10 @@ function registerIpc(): void {
   })
   ipcMain.handle(ipcChannels.jobsSetResourceMode, (_event, payload) =>
     indexer.request("jobs:set-resource-mode", resourceModeSchema.parse(payload)))
+  ipcMain.handle(ipcChannels.jobsGetProcessingSchedule, () =>
+    indexer.request("jobs:get-processing-schedule"))
+  ipcMain.handle(ipcChannels.jobsSetProcessingSchedule, (_event, payload) =>
+    indexer.request("jobs:set-processing-schedule", processingScheduleSchema.parse(payload)))
   ipcMain.handle(ipcChannels.modelsList, () => indexer.request("models:list"))
   ipcMain.handle(ipcChannels.modelsDownload, (_event, modelId) =>
     indexer.request("models:download", String(modelId), 24 * 60 * 60 * 1000))
@@ -131,6 +171,66 @@ function registerIpc(): void {
   })
   ipcMain.handle(ipcChannels.mediaDetail, (_event, mediaId) =>
     indexer.request("media:detail", String(mediaId)))
+  ipcMain.handle(ipcChannels.mediaRevealInExplorer, async (_event, payload) => {
+    const { mediaId } = mediaPlaybackRequestSchema.parse(payload)
+    shell.showItemInFolder(await requireMediaPath(mediaId))
+  })
+  ipcMain.handle(ipcChannels.mediaOpenExternal, async (_event, payload) => {
+    const { mediaId } = mediaExternalOpenRequestSchema.parse(payload)
+    const openError = await shell.openPath(await requireMediaPath(mediaId))
+    if (openError) throw new Error(openError)
+    return { mode: "default-player" as const, playerName: null }
+  })
+  ipcMain.handle(ipcChannels.mediaOpenExternalAt, async (_event, payload) => {
+    const { mediaId, startMs } = mediaExternalOpenRequestSchema.parse(payload)
+    if (startMs === undefined) throw new Error("A timestamp is required")
+    return openMediaAtTimestamp({
+      sourcePath: await requireMediaPath(mediaId),
+      mediaId,
+      startMs,
+      resourcesPath: runtimeResourcesPath,
+      temporaryPath: app.getPath("temp"),
+      openPath: (path) => shell.openPath(path)
+    })
+  })
+  ipcMain.handle(ipcChannels.mediaExportClip, async (_event, payload) => {
+    const { mediaId, startMs, endMs } = mediaExportClipRequestSchema.parse(payload)
+    const sourcePath = await requireMediaPath(mediaId)
+    const extension = extname(sourcePath)
+    const defaultPath = join(
+      dirname(sourcePath),
+      `${basename(sourcePath, extension)}-${fileTimestamp(startMs)}.mp4`
+    )
+    const result = await dialog.showSaveDialog({
+      title: "Export video clip",
+      defaultPath,
+      filters: [{ name: "MP4 video", extensions: ["mp4"] }]
+    })
+    if (result.canceled || !result.filePath) return { path: null }
+    await exportMediaClip({
+      sourcePath,
+      outputPath: result.filePath,
+      startMs,
+      endMs,
+      resourcesPath: runtimeResourcesPath
+    })
+    shell.showItemInFolder(result.filePath)
+    return { path: result.filePath }
+  })
+}
+
+function fileTimestamp(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor(totalSeconds % 3600 / 60)
+  const seconds = totalSeconds % 60
+  return [hours, minutes, seconds].map((part) => String(part).padStart(2, "0")).join("-")
+}
+
+async function requireMediaPath(mediaId: string): Promise<string> {
+  const path = await indexer.request<string | null>("media:path", mediaId)
+  if (!path) throw new Error("The source video is currently unavailable")
+  return path
 }
 
 function requireCodexManager(): CodexManager {
@@ -144,7 +244,7 @@ function registerProtocol(): void {
     const mediaId = decodeURIComponent(url.pathname.replace(/^\//, ""))
     const path = await indexer.request<string | null>("media:path", mediaId)
     if (!path) return new Response("Media unavailable", { status: 404 })
-    return net.fetch(pathToFileURL(path).toString(), { headers: request.headers })
+    return serveMediaFile(path, request)
   })
 }
 

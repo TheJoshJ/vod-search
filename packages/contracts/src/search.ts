@@ -16,6 +16,15 @@ export type SearchRequest = z.infer<typeof searchRequestSchema>
 
 export const matchReasonSchema = z.enum(["exact", "transcript", "tag", "semantic"])
 
+export const searchScoreBreakdownSchema = z.object({
+  semantic: z.number().min(0).max(100),
+  lexical: z.number().min(0).max(100),
+  transcript: z.number().min(0).max(100),
+  summary: z.number().min(0).max(100),
+  metadata: z.number().min(0).max(100)
+})
+export type SearchScoreBreakdown = z.infer<typeof searchScoreBreakdownSchema>
+
 export const searchHitSchema = z.object({
   mediaId: z.string(),
   title: z.string(),
@@ -29,7 +38,8 @@ export const searchHitSchema = z.object({
   events: z.array(z.string()),
   availability: z.enum(["available", "missing"]),
   matchReasons: z.array(matchReasonSchema),
-  score: z.number()
+  score: z.number().min(0).max(100),
+  scoreBreakdown: searchScoreBreakdownSchema
 })
 export type SearchHit = z.infer<typeof searchHitSchema>
 

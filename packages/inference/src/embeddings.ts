@@ -1,6 +1,20 @@
 import { env, pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers"
 
 const queryInstruction = "Represent this sentence for searching relevant passages: "
+export const BGE_EMBEDDING_VERSION = "bge-small-en-v1.5:v4"
+
+export function buildSemanticPassage(input: {
+  summary: string | null
+  transcript: string
+  metadata: string[]
+}): string {
+  const summary = input.summary?.trim()
+  const transcript = input.transcript.trim()
+  return [
+    summary ? `Summary: ${summary}` : transcript ? `Transcript: ${transcript}` : "",
+    ...input.metadata.map((value) => value.trim()).filter(Boolean)
+  ].filter(Boolean).join("\n")
+}
 
 export class BgeEmbedder {
   private extractor: FeatureExtractionPipeline | null = null

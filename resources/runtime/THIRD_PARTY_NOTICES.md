@@ -35,11 +35,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-## llama.cpp
-
-- Source: https://github.com/ggml-org/llama.cpp
-- License: MIT
-- Copyright (c) 2023-2026 The ggml authors
-
-llama.cpp is distributed under the same MIT license terms reproduced above.

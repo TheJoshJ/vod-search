@@ -1,17 +1,22 @@
 import { randomUUID } from "node:crypto"
 import type Database from "better-sqlite3"
-import type {
-  IndexStage,
-  Job,
-  JobStage,
-  LibraryStats,
-  MediaAsset,
-  MediaSummarySection,
-  ResourceMode,
-  SourceFolder,
-  TranscriptSegment,
-  EnrichedChunk,
-  TranscriptSource
+import {
+  defaultProcessingSchedule,
+  processingScheduleSchema,
+  type ProcessingSchedule,
+  type IndexStage,
+  type Job,
+  type JobStage,
+  type LibraryStats,
+  type MediaAsset,
+  type MediaSummarySection,
+  type ResourceMode,
+  type SharedTranscriptTopic,
+  type SourceFolder,
+  type TranscriptSegment,
+  type TranscriptTopic,
+  type EnrichedChunk,
+  type TranscriptSource
 } from "@vod-search/contracts"
 
 interface SourceFolderRow {
@@ -19,6 +24,7 @@ interface SourceFolderRow {
   path: string
   added_at_ms: number
   last_scan_at_ms: number | null
+  publish_shared_metadata: number
   available_media_count: number
   missing_media_count: number
 }
@@ -79,6 +85,8 @@ export interface NewSearchChunk {
   transcript: string
 }
 
+export interface NewTopicSearchChunk extends NewSearchChunk, Omit<TranscriptTopic, "startSegmentId"> {}
+
 export interface SearchChunkForEmbedding {
   id: number
   mediaId: string
@@ -103,6 +111,7 @@ export interface LexicalHitRow {
   entitiesJson: string
   eventsJson: string
   aliasesJson: string
+  searchPhrasesJson: string
   availability: "available" | "missing"
   rank: number
 }
@@ -110,23 +119,26 @@ export interface LexicalHitRow {
 export class Repository {
   constructor(private readonly db: Database.Database) {}
 
-  addSourceFolder(path: string, canonicalPath: string): SourceFolder {
+  addSourceFolder(path: string, canonicalPath: string, publishSharedMetadata = false): SourceFolder {
     const existing = this.db.prepare("SELECT id FROM source_folders WHERE canonical_path = ?").get(canonicalPath) as
       | { id: string }
       | undefined
-    if (existing) return this.getSourceFolder(existing.id)
+    if (existing) {
+      if (publishSharedMetadata) this.setSourceFolderSharing(existing.id, true)
+      return this.getSourceFolder(existing.id)
+    }
 
     const id = randomUUID()
     this.db.prepare(
-      `INSERT INTO source_folders(id, path, canonical_path, added_at_ms)
-       VALUES (?, ?, ?, ?)`
-    ).run(id, path, canonicalPath, Date.now())
+      `INSERT INTO source_folders(id, path, canonical_path, added_at_ms, publish_shared_metadata)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(id, path, canonicalPath, Date.now(), publishSharedMetadata ? 1 : 0)
     return this.getSourceFolder(id)
   }
 
   getSourceFolder(id: string): SourceFolder {
     const row = this.db.prepare(
-      `SELECT sf.id, sf.path, sf.added_at_ms, sf.last_scan_at_ms,
+      `SELECT sf.id, sf.path, sf.added_at_ms, sf.last_scan_at_ms, sf.publish_shared_metadata,
         COUNT(CASE WHEN ma.availability = 'available' THEN 1 END) AS available_media_count,
         COUNT(CASE WHEN ma.availability = 'missing' THEN 1 END) AS missing_media_count
        FROM source_folders sf
@@ -140,7 +152,7 @@ export class Repository {
 
   listSourceFolders(): SourceFolder[] {
     const rows = this.db.prepare(
-      `SELECT sf.id, sf.path, sf.added_at_ms, sf.last_scan_at_ms,
+      `SELECT sf.id, sf.path, sf.added_at_ms, sf.last_scan_at_ms, sf.publish_shared_metadata,
         COUNT(CASE WHEN ma.availability = 'available' THEN 1 END) AS available_media_count,
         COUNT(CASE WHEN ma.availability = 'missing' THEN 1 END) AS missing_media_count
        FROM source_folders sf
@@ -153,6 +165,28 @@ export class Repository {
 
   finishSourceFolderScan(id: string): void {
     this.db.prepare("UPDATE source_folders SET last_scan_at_ms = ? WHERE id = ?").run(Date.now(), id)
+  }
+
+  removeSourceFolder(id: string): void {
+    this.getSourceFolder(id)
+    const chunkRows = this.db.prepare(
+      `SELECT sc.id
+       FROM search_chunks sc
+       JOIN media_assets ma ON ma.id = sc.media_id
+       WHERE ma.source_folder_id = ?`
+    ).all(id) as Array<{ id: number }>
+    const vectorTable = this.db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE name = 'search_chunk_vectors'"
+    ).get() as { 1: number } | undefined
+    const removeVector = vectorTable ? this.db.prepare("DELETE FROM search_chunk_vectors WHERE chunk_id = ?") : null
+    const removeFts = this.db.prepare("DELETE FROM search_chunks_fts WHERE chunk_id = ?")
+    this.db.transaction(() => {
+      for (const row of chunkRows) {
+        removeVector?.run(row.id)
+        removeFts.run(row.id)
+      }
+      this.db.prepare("DELETE FROM source_folders WHERE id = ?").run(id)
+    })()
   }
 
   upsertMedia(input: UpsertMediaInput): MediaAsset {
@@ -397,6 +431,71 @@ export class Repository {
     })()
   }
 
+  getTranscriptSegmentsInRange(mediaId: string, startMs: number, endMs: number): Array<Pick<TranscriptSegment, "startMs" | "endMs" | "text">> {
+    return this.db.prepare(
+      `SELECT start_ms, end_ms, text
+       FROM transcript_segments
+       WHERE media_id = ? AND end_ms >= ? AND start_ms <= ?
+       ORDER BY start_ms`
+    ).all(mediaId, startMs, endMs).map((row) => {
+      const item = row as { start_ms: number; end_ms: number; text: string }
+      return { startMs: item.start_ms, endMs: item.end_ms, text: item.text }
+    })
+  }
+
+  setSourceFolderSharing(id: string, publishSharedMetadata: boolean): void {
+    const result = this.db.prepare(
+      "UPDATE source_folders SET publish_shared_metadata = ? WHERE id = ?"
+    ).run(publishSharedMetadata ? 1 : 0, id)
+    if (result.changes !== 1) throw new Error(`Unknown source folder: ${id}`)
+  }
+
+  replaceChunksWithTopics(mediaId: string, chunks: NewTopicSearchChunk[], enrichmentVersion: string): void {
+    if (chunks.length === 0) throw new Error("At least one topic is required")
+    const existing = this.db.prepare("SELECT id FROM search_chunks WHERE media_id = ?").all(mediaId) as Array<{ id: number }>
+    const removeVector = this.db.prepare("DELETE FROM search_chunk_vectors WHERE chunk_id = ?")
+    const removeFts = this.db.prepare("DELETE FROM search_chunks_fts WHERE chunk_id = ?")
+    const removeChunks = this.db.prepare("DELETE FROM search_chunks WHERE media_id = ?")
+    const insertChunk = this.db.prepare(
+      `INSERT INTO search_chunks(
+         media_id, start_ms, end_ms, transcript, summary, entities_json, events_json,
+         aliases_json, search_phrases_json, enrichment_confidence, chunk_version, enrichment_version
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    const insertFts = this.db.prepare(
+      `INSERT INTO search_chunks_fts(chunk_id, title, transcript, summary, tags)
+       SELECT ?, display_name, ?, ?, ? FROM media_assets WHERE id = ?`
+    )
+    this.db.transaction(() => {
+      for (const row of existing) {
+        removeVector.run(row.id)
+        removeFts.run(row.id)
+      }
+      removeChunks.run(mediaId)
+      for (const chunk of chunks) {
+        const result = insertChunk.run(
+          mediaId,
+          chunk.startMs,
+          chunk.endMs,
+          chunk.transcript,
+          chunk.summary,
+          JSON.stringify(chunk.entities),
+          JSON.stringify(chunk.events),
+          JSON.stringify(chunk.aliases),
+          JSON.stringify(chunk.searchPhrases),
+          chunk.confidence,
+          "topic-v2",
+          enrichmentVersion
+        )
+        const chunkId = Number(result.lastInsertRowid)
+        insertFts.run(chunkId, chunk.transcript, chunk.summary, enrichmentTags(chunk), mediaId)
+      }
+      this.db.prepare(
+        "UPDATE media_assets SET highest_completed_stage = 'enriched', updated_at_ms = ? WHERE id = ?"
+      ).run(Date.now(), mediaId)
+    })()
+  }
+
   countSearchChunks(): number {
     return (this.db.prepare("SELECT COUNT(*) AS count FROM search_chunks").get() as { count: number }).count
   }
@@ -493,9 +592,11 @@ export class Repository {
   applyEnrichments(mediaId: string, enrichments: EnrichedChunk[], version: string): void {
     const update = this.db.prepare(
       `UPDATE search_chunks SET summary = ?, entities_json = ?, events_json = ?, aliases_json = ?,
-                                search_phrases_json = ?, enrichment_confidence = ?, enrichment_version = ?
+                                search_phrases_json = ?, enrichment_confidence = ?, enrichment_version = ?,
+                                embedding_version = NULL
        WHERE id = ? AND media_id = ?`
     )
+    const removeVector = this.db.prepare("DELETE FROM search_chunk_vectors WHERE chunk_id = ?")
     const removeFts = this.db.prepare("DELETE FROM search_chunks_fts WHERE chunk_id = ?")
     const insertFts = this.db.prepare(
       `INSERT INTO search_chunks_fts(chunk_id, title, transcript, summary, tags)
@@ -521,6 +622,7 @@ export class Repository {
           mediaId
         )
         if (result.changes !== 1) throw new Error(`Enrichment referenced an unknown chunk: ${enrichment.chunkId}`)
+        removeVector.run(enrichment.chunkId)
         const tags = [
           ...enrichment.entities.flatMap((entity) => [entity.name, entity.type]),
           ...enrichment.events.flatMap((event) => [event.type, event.subject ?? "", event.object ?? ""]),
@@ -559,7 +661,7 @@ export class Repository {
         `SELECT sc.id AS chunk_id, sc.media_id, ma.display_name AS title,
                 ma.relative_path, ma.created_at_ms,
                 sc.start_ms, sc.end_ms, sc.transcript, sc.summary,
-                sc.entities_json, sc.events_json, sc.aliases_json,
+                sc.entities_json, sc.events_json, sc.aliases_json, sc.search_phrases_json,
                 ma.availability, vec.distance AS rank
          FROM search_chunk_vectors vec
          JOIN search_chunks sc ON sc.id = vec.chunk_id
@@ -581,7 +683,7 @@ export class Repository {
         chunk_id: number; media_id: string; title: string; relative_path: string; created_at_ms: number;
         start_ms: number; end_ms: number;
         transcript: string; summary: string | null; entities_json: string; events_json: string;
-        aliases_json: string; availability: "available" | "missing"; rank: number
+        aliases_json: string; search_phrases_json: string; availability: "available" | "missing"; rank: number
       }>
       return rows.map((row) => ({
         chunkId: row.chunk_id,
@@ -596,6 +698,7 @@ export class Repository {
         entitiesJson: row.entities_json,
         eventsJson: row.events_json,
         aliasesJson: row.aliases_json,
+        searchPhrasesJson: row.search_phrases_json,
         availability: row.availability,
         rank: row.rank
       }))
@@ -617,7 +720,7 @@ export class Repository {
       `SELECT sc.id AS chunk_id, sc.media_id, ma.display_name AS title,
               ma.relative_path, ma.created_at_ms,
               sc.start_ms, sc.end_ms, sc.transcript, sc.summary,
-              sc.entities_json, sc.events_json, sc.aliases_json,
+              sc.entities_json, sc.events_json, sc.aliases_json, sc.search_phrases_json,
               ma.availability, bm25(search_chunks_fts, 0.0, 3.0, 2.0, 1.5, 2.0) AS rank
        FROM search_chunks_fts
        JOIN search_chunks sc ON sc.id = search_chunks_fts.chunk_id
@@ -632,7 +735,7 @@ export class Repository {
       chunk_id: number; media_id: string; title: string; relative_path: string; created_at_ms: number;
       start_ms: number; end_ms: number;
       transcript: string; summary: string | null; entities_json: string; events_json: string;
-      aliases_json: string; availability: "available" | "missing"; rank: number
+      aliases_json: string; search_phrases_json: string; availability: "available" | "missing"; rank: number
     }>
     return rows.map((row) => ({
       chunkId: row.chunk_id,
@@ -647,6 +750,7 @@ export class Repository {
       entitiesJson: row.entities_json,
       eventsJson: row.events_json,
       aliasesJson: row.aliases_json,
+      searchPhrasesJson: row.search_phrases_json,
       availability: row.availability,
       rank: row.rank
     }))
@@ -654,13 +758,13 @@ export class Repository {
 
   enqueueJob(mediaId: string | null, stage: JobStage, priority = 0): Job {
     const existing = mediaId
-      ? this.db.prepare("SELECT id FROM jobs WHERE media_id = ? AND stage = ?").get(mediaId, stage) as
-          | { id: string }
+      ? this.db.prepare("SELECT id, status FROM jobs WHERE media_id = ? AND stage = ?").get(mediaId, stage) as
+          | { id: string; status: Job["status"] }
           | undefined
       : undefined
     if (existing) {
       this.db.prepare(
-        `UPDATE jobs SET status = CASE WHEN status IN ('succeeded', 'running') THEN status ELSE 'queued' END,
+        `UPDATE jobs SET status = CASE WHEN status = 'cancelled' THEN 'queued' ELSE status END,
                          priority = MAX(priority, ?), updated_at_ms = ?
          WHERE id = ?`
       ).run(priority, Date.now(), existing.id)
@@ -674,6 +778,155 @@ export class Repository {
        VALUES (?, ?, ?, 'queued', ?, ?, ?)`
     ).run(id, mediaId, stage, priority, now, now)
     return this.getJob(id)
+  }
+
+  isEnrichmentComplete(mediaId: string, requiredVersion?: string): boolean {
+    const staleCondition = requiredVersion
+      ? "enrichment_version IS NULL OR enrichment_version <> ?"
+      : "enrichment_version IS NULL"
+    const row = this.db.prepare(
+      `SELECT COUNT(*) AS total,
+              COUNT(CASE WHEN ${staleCondition} THEN 1 END) AS pending
+       FROM search_chunks WHERE media_id = ?`
+    ).get(...(requiredVersion ? [requiredVersion, mediaId] : [mediaId])) as { total: number; pending: number }
+    return row.total > 0 && row.pending === 0
+  }
+
+  getTopicsForSharing(mediaId: string): { enrichmentVersion: string; topics: SharedTranscriptTopic[] } | null {
+    const rows = this.db.prepare(
+      `SELECT start_ms, end_ms, summary, entities_json, events_json, aliases_json,
+              search_phrases_json, enrichment_confidence, enrichment_version
+       FROM search_chunks
+       WHERE media_id = ?
+       ORDER BY start_ms`
+    ).all(mediaId) as Array<{
+      start_ms: number
+      end_ms: number
+      summary: string | null
+      entities_json: string
+      events_json: string
+      aliases_json: string
+      search_phrases_json: string
+      enrichment_confidence: number | null
+      enrichment_version: string | null
+    }>
+    if (rows.length === 0 || rows.some((row) => !row.summary || !row.enrichment_version || row.enrichment_confidence === null)) {
+      return null
+    }
+    const versions = new Set(rows.map((row) => row.enrichment_version!))
+    if (versions.size !== 1) return null
+    return {
+      enrichmentVersion: rows[0]!.enrichment_version!,
+      topics: rows.map((row) => ({
+        startMs: row.start_ms,
+        endMs: row.end_ms,
+        summary: row.summary!,
+        entities: JSON.parse(row.entities_json) as SharedTranscriptTopic["entities"],
+        events: JSON.parse(row.events_json) as SharedTranscriptTopic["events"],
+        aliases: JSON.parse(row.aliases_json) as string[],
+        searchPhrases: JSON.parse(row.search_phrases_json) as string[],
+        confidence: row.enrichment_confidence!
+      }))
+    }
+  }
+
+  ensureEnrichmentJobs(requiredVersion?: string): number {
+    const staleCondition = requiredVersion
+      ? "sc.enrichment_version IS NULL OR sc.enrichment_version <> ?"
+      : "sc.enrichment_version IS NULL"
+    return this.ensureDerivedJobs(
+      "enrich",
+      `EXISTS (
+         SELECT 1 FROM search_chunks sc
+         WHERE sc.media_id = ma.id AND (${staleCondition})
+       )`,
+      requiredVersion ? [requiredVersion] : []
+    )
+  }
+
+  ensureEmbeddingJobs(requiredEnrichmentVersion?: string, requiredEmbeddingVersion?: string): number {
+    const staleCondition = requiredEnrichmentVersion
+      ? "sc.enrichment_version IS NULL OR sc.enrichment_version <> ?"
+      : "sc.enrichment_version IS NULL"
+    const staleEmbeddingCondition = requiredEmbeddingVersion
+      ? "sc.embedding_version IS NULL OR sc.embedding_version <> ?"
+      : "sc.embedding_version IS NULL"
+    return this.ensureDerivedJobs(
+      "embed",
+      `EXISTS (SELECT 1 FROM search_chunks sc WHERE sc.media_id = ma.id)
+       AND NOT EXISTS (
+         SELECT 1 FROM search_chunks sc
+         WHERE sc.media_id = ma.id AND (${staleCondition})
+       )
+       AND EXISTS (
+         SELECT 1 FROM search_chunks sc
+         WHERE sc.media_id = ma.id AND (${staleEmbeddingCondition})
+       )`,
+      [
+        ...(requiredEnrichmentVersion ? [requiredEnrichmentVersion] : []),
+        ...(requiredEmbeddingVersion ? [requiredEmbeddingVersion] : [])
+      ]
+    )
+  }
+
+  private ensureDerivedJobs(stage: "embed" | "enrich", prerequisiteSql: string, parameters: unknown[] = []): number {
+    const rows = this.db.prepare(
+      `SELECT ma.id AS media_id, ma.modified_at_ms
+       FROM media_assets ma
+       WHERE ma.availability = 'available' AND ${prerequisiteSql}`
+    ).all(...parameters) as Array<{ media_id: string; modified_at_ms: number }>
+    let queued = 0
+    for (const row of rows) {
+      const existing = this.db.prepare(
+        "SELECT status FROM jobs WHERE media_id = ? AND stage = ?"
+      ).get(row.media_id, stage) as { status: Job["status"] } | undefined
+      if (!existing || existing.status === "cancelled" || existing.status === "succeeded") {
+        this.requeueJob(row.media_id, stage, Math.round(row.modified_at_ms / 1000))
+        queued += 1
+      }
+    }
+    return queued
+  }
+
+  cancelEmbeddingsBlockedByEnrichment(requiredVersion?: string): number {
+    const staleCondition = requiredVersion
+      ? "sc.enrichment_version IS NULL OR sc.enrichment_version <> ?"
+      : "sc.enrichment_version IS NULL"
+    return this.db.prepare(
+      `UPDATE jobs AS embedding
+       SET status = 'cancelled', progress = 0, error = NULL, updated_at_ms = ?
+       WHERE embedding.stage = 'embed'
+         AND embedding.status IN ('queued', 'paused')
+         AND (
+           NOT EXISTS (SELECT 1 FROM search_chunks sc WHERE sc.media_id = embedding.media_id)
+           OR EXISTS (
+             SELECT 1 FROM search_chunks sc
+             WHERE sc.media_id = embedding.media_id AND (${staleCondition})
+           )
+         )`
+    ).run(Date.now(), ...(requiredVersion ? [requiredVersion] : [])).changes
+  }
+
+  cancelPendingJobsByStage(stage: "embed" | "enrich"): number {
+    return this.db.prepare(
+      `UPDATE jobs SET status = 'cancelled', progress = 0, error = NULL, updated_at_ms = ?
+       WHERE stage = ? AND status IN ('queued', 'paused')`
+    ).run(Date.now(), stage).changes
+  }
+
+  cancelTranscriptionsBlockedByFailedProbe(): number {
+    return this.db.prepare(
+      `UPDATE jobs AS transcription
+       SET status = 'cancelled', progress = 0, error = NULL, updated_at_ms = ?
+       WHERE transcription.stage = 'transcribe'
+         AND transcription.status IN ('queued', 'paused', 'failed')
+         AND EXISTS (
+           SELECT 1 FROM jobs AS probe
+           WHERE probe.media_id = transcription.media_id
+             AND probe.stage = 'probe'
+             AND probe.status = 'failed'
+         )`
+    ).run(Date.now()).changes
   }
 
   getJob(id: string): Job {
@@ -727,6 +980,16 @@ export class Repository {
     return this.getJob(id)
   }
 
+  retryJob(id: string): Job {
+    const current = this.getJob(id)
+    if (current.status !== "failed" && current.status !== "cancelled") return current
+    this.db.prepare(
+      `UPDATE jobs SET status = 'queued', progress = 0, error = NULL, updated_at_ms = ?
+       WHERE id = ?`
+    ).run(Date.now(), id)
+    return this.getJob(id)
+  }
+
   cancelJob(mediaId: string, stage: JobStage): void {
     this.db.prepare(
       `UPDATE jobs SET status = 'cancelled', error = NULL, updated_at_ms = ?
@@ -762,6 +1025,27 @@ export class Repository {
       `INSERT INTO settings(key, value_json, updated_at_ms) VALUES ('resource_mode', ?, ?)
        ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms`
     ).run(JSON.stringify(mode), Date.now())
+  }
+
+  getProcessingSchedule(): ProcessingSchedule {
+    const row = this.db.prepare("SELECT value_json FROM settings WHERE key = 'processing_schedule'").get() as
+      | { value_json: string }
+      | undefined
+    if (!row) return processingScheduleSchema.parse(defaultProcessingSchedule)
+    try {
+      return processingScheduleSchema.parse(JSON.parse(row.value_json))
+    } catch {
+      return processingScheduleSchema.parse(defaultProcessingSchedule)
+    }
+  }
+
+  setProcessingSchedule(schedule: ProcessingSchedule): ProcessingSchedule {
+    const parsed = processingScheduleSchema.parse(schedule)
+    this.db.prepare(
+      `INSERT INTO settings(key, value_json, updated_at_ms) VALUES ('processing_schedule', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms`
+    ).run(JSON.stringify(parsed), Date.now())
+    return parsed
   }
 
   getStats(): LibraryStats {
@@ -813,6 +1097,7 @@ function mapSourceFolder(row: SourceFolderRow): SourceFolder {
     path: row.path,
     addedAtMs: row.added_at_ms,
     lastScanAtMs: row.last_scan_at_ms,
+    publishSharedMetadata: row.publish_shared_metadata === 1,
     availableMediaCount: row.available_media_count,
     missingMediaCount: row.missing_media_count
   }
@@ -832,6 +1117,15 @@ function mapMedia(row: MediaRow): MediaAsset {
     availability: row.availability,
     highestCompletedStage: row.highest_completed_stage
   }
+}
+
+function enrichmentTags(topic: Omit<TranscriptTopic, "startSegmentId">): string {
+  return [
+    ...topic.entities.flatMap((entity) => [entity.name, entity.type]),
+    ...topic.events.flatMap((event) => [event.type, event.subject ?? "", event.object ?? ""]),
+    ...topic.aliases,
+    ...topic.searchPhrases
+  ].filter(Boolean).join(" ")
 }
 
 function jsonStringField(json: string, field: string): string[] {

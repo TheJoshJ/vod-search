@@ -1,4 +1,6 @@
 import type { SearchHit, SearchRequest, SearchResponse } from "@vod-search/contracts"
+import { analyzeTextMatch, findBestTimedText, isCoherentTextMatch, type TimedText } from "./relevance.js"
+import { lexicalRankQuality, scoreSearchResult, semanticDistanceQuality, textMatchQuality } from "./scoring.js"
 
 export interface LexicalSearchRecord {
   chunkId: number
@@ -13,6 +15,7 @@ export interface LexicalSearchRecord {
   entitiesJson: string
   eventsJson: string
   aliasesJson: string
+  searchPhrasesJson: string
   availability: "available" | "missing"
   rank: number
 }
@@ -26,6 +29,7 @@ export interface SearchRepository {
     createdBeforeMs?: number
   ): LexicalSearchRecord[]
   countSearchChunks(): number
+  getTranscriptSegmentsInRange?(mediaId: string, startMs: number, endMs: number): TimedText[]
   semanticSearch?(
     embedding: Float32Array,
     includeMissing: boolean,
@@ -57,33 +61,42 @@ export class SearchService {
           request.createdBeforeMs
         )
       : []
-    const queryLower = request.query.toLocaleLowerCase("en-US")
-
     const lexicalRanks = new Map(lexical.map((row, index) => [row.chunkId, index + 1]))
-    const semanticRanks = new Map(semantic.map((row, index) => [row.chunkId, index + 1]))
+    const semanticDistances = new Map(semantic.map((row) => [row.chunkId, row.rank]))
     const candidates = new Map<number, LexicalSearchRecord>()
     for (const row of lexical) candidates.set(row.chunkId, row)
     for (const row of semantic) candidates.set(row.chunkId, row)
 
-    const hits = [...candidates.values()].map((row): SearchHit => {
+    const hits = [...candidates.values()].flatMap((row): SearchHit[] => {
       const entities = parseStringValues(row.entitiesJson, "name")
       const events = parseStringValues(row.eventsJson, "type")
       const aliases = parseStringValues(row.aliasesJson)
-      const searchable = [row.title, row.transcript, row.summary ?? "", ...entities, ...events, ...aliases]
-        .join(" ")
-        .toLocaleLowerCase("en-US")
-      const exact = searchable.includes(queryLower)
+      const searchPhrases = parseStringValues(row.searchPhrasesJson)
+      const transcriptMatch = analyzeTextMatch(row.transcript, request.query)
+      const summaryMatch = analyzeTextMatch(row.summary ?? "", request.query)
+      const tagMatches = [...entities, ...events, ...aliases, ...searchPhrases]
+        .map((value) => analyzeTextMatch(value, request.query))
+      const transcriptEvidence = isCoherentTextMatch(transcriptMatch)
+      const summaryEvidence = isCoherentTextMatch(summaryMatch)
+      const tagEvidence = tagMatches.some(isCoherentTextMatch)
+      const hasFieldEvidence = transcriptEvidence || summaryEvidence || tagEvidence
+      const lexicalRank = hasFieldEvidence ? lexicalRanks.get(row.chunkId) : undefined
+      const semanticDistance = semanticDistances.get(row.chunkId)
+      if (request.mode === "keyword" && !hasFieldEvidence) return []
 
-      const lexicalRank = lexicalRanks.get(row.chunkId)
-      const semanticRank = semanticRanks.get(row.chunkId)
-      const score = (lexicalRank ? 1 / (60 + lexicalRank) : 0) +
-        (semanticRank ? 0.8 / (60 + semanticRank) : 0) +
-        (exact ? 0.02 : 0)
+      const scored = scoreSearchResult(request.mode, {
+        semantic: semanticDistanceQuality(semanticDistance),
+        lexical: lexicalRankQuality(lexicalRank),
+        transcript: textMatchQuality(transcriptMatch),
+        summary: textMatchQuality(summaryMatch),
+        metadata: Math.max(0, ...tagMatches.map(textMatchQuality))
+      })
       const matchReasons: SearchHit["matchReasons"] = []
-      if (exact) matchReasons.push("exact")
-      if (lexicalRank) matchReasons.push("transcript")
-      if (semanticRank) matchReasons.push("semantic")
-      return {
+      if (transcriptMatch.exactPhrase || summaryMatch.exactPhrase || tagMatches.some((match) => match.exactPhrase)) matchReasons.push("exact")
+      if (transcriptEvidence) matchReasons.push("transcript")
+      if (!transcriptEvidence && (summaryEvidence || tagEvidence)) matchReasons.push("tag")
+      if (semanticDistance !== undefined) matchReasons.push("semantic")
+      return [{
         mediaId: row.mediaId,
         title: row.title,
         relativePath: row.relativePath,
@@ -96,15 +109,30 @@ export class SearchService {
         events,
         availability: row.availability,
         matchReasons,
-        score
-      }
+        score: scored.score,
+        scoreBreakdown: scored.breakdown
+      }]
     }).sort((a, b) => b.score - a.score)
 
     const merged = mergeNearbyHits(hits).slice(0, request.limit)
+    const refined = merged.map((hit) => this.refineTimestamp(hit, request.query))
     return {
-      hits: merged,
+      hits: refined,
       elapsedMs: performance.now() - startedAt,
       indexedChunkCount: this.repository.countSearchChunks()
+    }
+  }
+
+  private refineTimestamp(hit: SearchHit, query: string): SearchHit {
+    const segments = this.repository.getTranscriptSegmentsInRange?.(hit.mediaId, hit.startMs, hit.endMs)
+    if (!segments?.length) return hit
+    const best = findBestTimedText(segments, query)
+    if (!best) return hit
+    return {
+      ...hit,
+      startMs: best.startMs,
+      endMs: best.endMs,
+      transcriptExcerpt: best.text.trim()
     }
   }
 }

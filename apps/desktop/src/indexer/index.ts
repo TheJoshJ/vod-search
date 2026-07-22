@@ -4,23 +4,32 @@ import { access, mkdir } from "node:fs/promises"
 import { openDatabase, Repository } from "@vod-search/database"
 import {
   addFolderRequestSchema,
+  isJobStageAllowed,
+  isProcessingWindowOpen,
   listMediaRequestSchema,
+  processingScheduleSchema,
   resourceModeSchema,
-  searchRequestSchema
+  retryJobRequestSchema,
+  searchRequestSchema,
+  setFolderSharingRequestSchema,
+  type ProcessingSchedule,
+  type TranscriptSegment,
+  type TranscriptTopic
 } from "@vod-search/contracts"
 import { chunkTranscript, parseSubtitle, SearchService } from "@vod-search/search"
 import {
+  BGE_EMBEDDING_VERSION,
   BgeEmbedder,
+  buildSemanticPassage,
   CODEX_ENRICHMENT_VERSION,
   CodexEnricher,
   extractEmbeddedSubtitle,
-  MAX_CODEX_ENRICHMENT_CHARACTERS,
-  MAX_CODEX_ENRICHMENT_CHUNKS,
   ModelManager,
   probeMedia,
   transcribeWithWhisper
 } from "@vod-search/inference"
 import { scanSourceFolder } from "./scanner.js"
+import { publishSharedMetadata } from "./shared-metadata.js"
 import { watch, type FSWatcher } from "chokidar"
 
 interface RpcRequest {
@@ -41,6 +50,7 @@ if (!modelsPathFromEnvironment) throw new Error("VOD_SEARCH_MODELS_PATH is requi
 const modelsPath: string = modelsPathFromEnvironment
 const models = new ModelManager(modelsPath, undefined, notifyModelsChanged)
 repository.recoverRunningJobs()
+repository.cancelTranscriptionsBlockedByFailedProbe()
 let embedder: BgeEmbedder | null = null
 let embedderStarting: Promise<BgeEmbedder | null> | null = null
 let enricher: CodexEnricher | null = null
@@ -79,18 +89,45 @@ async function dispatch(method: string, payload: unknown): Promise<unknown> {
     case "library:add-folder": {
       const input = addFolderRequestSchema.parse(payload)
       const canonicalPath = resolve(input.path)
-      const folder = repository.addSourceFolder(input.path, canonicalPath)
+      const folder = repository.addSourceFolder(input.path, canonicalPath, input.publishSharedMetadata)
       ensureFolderWatcher(folder.id, folder.path)
       startFolderScan(folder.id, folder.path)
       return folder
     }
     case "library:list-folders": return repository.listSourceFolders()
+    case "library:get-folder": return repository.getSourceFolder(String(payload))
+    case "library:set-folder-sharing": {
+      const input = setFolderSharingRequestSchema.parse(payload)
+      repository.setSourceFolderSharing(input.folderId, input.publishSharedMetadata)
+      const folder = repository.getSourceFolder(input.folderId)
+      if (input.publishSharedMetadata) await publishSourceFolder(input.folderId)
+      startFolderScan(folder.id, folder.path)
+      notifyLibraryChanged()
+      return repository.getSourceFolder(input.folderId)
+    }
     case "library:list-media": return repository.listMedia(listMediaRequestSchema.parse(payload))
     case "library:stats": return repository.getStats()
     case "library:rescan": {
       const id = String(payload)
       const folder = repository.getSourceFolder(id)
-      startFolderScan(id, folder.path)
+      startFolderScan(id, folder.path, true)
+      return undefined
+    }
+    case "library:remove-folder": {
+      const id = String(payload)
+      repository.getSourceFolder(id)
+      rescanRequested.delete(id)
+      const timer = rescanTimers.get(id)
+      if (timer) clearTimeout(timer)
+      rescanTimers.delete(id)
+      const watcher = folderWatchers.get(id)
+      if (watcher) await watcher.close()
+      folderWatchers.delete(id)
+      const activeScan = activeScans.get(id)
+      if (activeScan) await activeScan
+      repository.removeSourceFolder(id)
+      notifyLibraryChanged()
+      notifyJobsChanged()
       return undefined
     }
     case "search:query": {
@@ -100,20 +137,22 @@ async function dispatch(method: string, payload: unknown): Promise<unknown> {
       return search.search(input, queryEmbedding)
     }
     case "jobs:list": return repository.listJobs()
+    case "jobs:retry": repository.retryJob(retryJobRequestSchema.parse({ jobId: payload }).jobId); notifyJobsChanged(); return undefined
     case "jobs:pause-all": repository.pauseAllJobs(); notifyJobsChanged(); return undefined
     case "jobs:resume-all": repository.resumeAllJobs(); notifyJobsChanged(); return undefined
     case "jobs:set-resource-mode": repository.setResourceMode(resourceModeSchema.parse(payload)); return undefined
+    case "jobs:get-processing-schedule": return repository.getProcessingSchedule()
+    case "jobs:set-processing-schedule": {
+      const schedule = repository.setProcessingSchedule(processingScheduleSchema.parse(payload))
+      notifyJobsChanged()
+      return schedule
+    }
     case "models:list": return models.list()
     case "models:download": await models.install(String(payload)); return undefined
     case "models:cancel-download": models.cancel(String(payload)); return undefined
     case "codex:refresh": {
       enricher = null
       nextEnricherAttemptAt = 0
-      for (const job of repository.listJobs()) {
-        if (job.mediaId && job.stage === "enrich" && job.status === "failed") {
-          repository.requeueJob(job.mediaId, "enrich")
-        }
-      }
       notifyJobsChanged()
       return undefined
     }
@@ -164,6 +203,8 @@ async function runSchedulerTick(): Promise<void> {
   if (schedulerRunning) return
   schedulerRunning = true
   try {
+    const processingSchedule = repository.getProcessingSchedule()
+    drainScheduledScans(processingSchedule)
     const installations = await models.list()
     const ffprobePath = await findRuntimeExecutable("ffprobe")
     const ffmpegPath = await findRuntimeExecutable("ffmpeg")
@@ -171,12 +212,23 @@ async function runSchedulerTick(): Promise<void> {
     const hasEmbeddingModel = installations.some((model) =>
       model.modelId === "bge-small-en-v1.5" && model.status === "installed")
     const activeEnricher = await getEnricher()
+    let reconciledJobs = repository.cancelTranscriptionsBlockedByFailedProbe()
+    if (activeEnricher) reconciledJobs += repository.ensureEnrichmentJobs(CODEX_ENRICHMENT_VERSION)
+    else reconciledJobs += repository.cancelPendingJobsByStage("enrich")
+    if (hasEmbeddingModel) {
+      reconciledJobs += repository.cancelEmbeddingsBlockedByEnrichment(CODEX_ENRICHMENT_VERSION)
+      reconciledJobs += repository.ensureEmbeddingJobs(CODEX_ENRICHMENT_VERSION, BGE_EMBEDDING_VERSION)
+    } else {
+      reconciledJobs += repository.cancelPendingJobsByStage("embed")
+    }
+    if (reconciledJobs > 0) notifyJobsChanged()
+    const now = new Date()
     const availableStages = [
       ...(ffprobePath ? ["probe" as const] : []),
       ...(transcriptionRuntime ? ["transcribe" as const] : []),
-      ...(hasEmbeddingModel ? ["embed" as const] : []),
-      ...(activeEnricher ? ["enrich" as const] : [])
-    ]
+      ...(activeEnricher ? ["enrich" as const] : []),
+      ...(hasEmbeddingModel ? ["embed" as const] : [])
+    ].filter((stage) => isJobStageAllowed(processingSchedule, stage, now))
     if (availableStages.length === 0) return
     const job = repository.claimNextJob(availableStages)
     if (!job?.mediaId) return
@@ -244,10 +296,12 @@ async function getEnricher(): Promise<CodexEnricher | null> {
   if (enricher) return enricher
   if (Date.now() < nextEnricherAttemptAt) return null
   try {
+    const command = await findCodexCommand()
     const instance = new CodexEnricher()
     await instance.start({
       workspacePath: join(dirname(modelsPath), "codex-workspace"),
-      executablePath: await findCodexExecutable()
+      executablePath: command.executablePath,
+      executablePrefixArgs: command.prefixArgs
     })
     const status = await instance.probe()
     if (!status.installed || !status.authenticated) {
@@ -289,7 +343,6 @@ async function runProbeJob(
           segments
         )
         repository.replaceChunks(mediaId, "chunk-v1", chunkTranscript(segments))
-        repository.requeueJob(mediaId, "embed")
         repository.requeueJob(mediaId, "enrich")
         repository.cancelJob(mediaId, "transcribe")
       }
@@ -297,6 +350,9 @@ async function runProbeJob(
       console.warn(`Embedded subtitles could not be extracted for ${mediaPath}; Whisper will be used instead.`, error)
     }
   }
+
+  if (repository.getTranscriptVersion(mediaId) === null) repository.enqueueJob(mediaId, "transcribe")
+  else repository.cancelJob(mediaId, "transcribe")
 
   repository.updateJob(jobId, { status: "succeeded", progress: 1, error: null })
   notifyLibraryChanged()
@@ -313,6 +369,7 @@ async function runTranscriptionJob(
   const version = `whisper-small-en:${runtime.modelVersion}:${media.quickFingerprint}`
   const existingVersion = repository.getTranscriptVersion(mediaId)
   if (existingVersion === version || existingVersion?.startsWith("sidecar-") || existingVersion?.startsWith("embedded-")) {
+    repository.requeueJob(mediaId, "enrich")
     repository.updateJob(jobId, { status: "succeeded", progress: 1, error: null })
     return
   }
@@ -339,7 +396,6 @@ async function runTranscriptionJob(
     repository.replaceTranscript(mediaId, "whisper", version, segments)
     repository.setMediaStage(mediaId, "transcribed")
     repository.replaceChunks(mediaId, "chunk-v1", chunkTranscript(segments))
-    repository.requeueJob(mediaId, "embed")
     repository.requeueJob(mediaId, "enrich")
   }
   repository.updateJob(jobId, { status: "succeeded", progress: 1, error: null })
@@ -360,6 +416,10 @@ function transcriptionThreads(mode: "low" | "normal" | "high"): number {
 }
 
 async function runEmbeddingJob(jobId: string, mediaId: string, activeEmbedder: BgeEmbedder): Promise<void> {
+  if (!repository.isEnrichmentComplete(mediaId)) {
+    repository.cancelJob(mediaId, "embed")
+    return
+  }
   const chunks = repository.getChunksForEmbedding(mediaId)
   const chunkIds = chunks.map((chunk) => chunk.id)
   let completed = 0
@@ -372,7 +432,7 @@ async function runEmbeddingJob(jobId: string, mediaId: string, activeEmbedder: B
     }
     repository.storeEmbeddings(
       batch.map((chunk, batchIndex) => ({ chunkId: chunk.id, embedding: embeddings[batchIndex]! })),
-      "bge-small-en-v1.5:v1"
+      BGE_EMBEDDING_VERSION
     )
     completed += batch.length
     repository.updateJob(jobId, { progress: chunks.length ? completed / chunks.length : 1 })
@@ -388,38 +448,50 @@ async function runEmbeddingJob(jobId: string, mediaId: string, activeEmbedder: B
 }
 
 async function runEnrichmentJob(jobId: string, mediaId: string, activeEnricher: CodexEnricher): Promise<void> {
-  const chunks = repository.getChunksForEnrichment(mediaId)
-  const chunkIds = chunks.map((chunk) => chunk.id)
-  let completed = 0
-  for (let index = 0; index < chunks.length;) {
-    const batch = [] as typeof chunks
-    let characters = 0
-    while (index < chunks.length && batch.length < MAX_CODEX_ENRICHMENT_CHUNKS) {
-      const candidate = chunks[index]!
-      if (batch.length > 0 && characters + candidate.transcript.length > MAX_CODEX_ENRICHMENT_CHARACTERS) break
-      batch.push(candidate)
-      characters += candidate.transcript.length
-      index += 1
-    }
-    const result = await activeEnricher.enrich(batch.map((chunk) => ({
-      chunkId: chunk.id,
-      startMs: chunk.startMs,
-      endMs: chunk.endMs,
-      transcript: chunk.transcript
-    })))
-    if (!repository.areCurrentChunks(mediaId, chunkIds)) {
-      repository.requeueJob(mediaId, "enrich")
-      return
-    }
-    repository.applyEnrichments(mediaId, result, CODEX_ENRICHMENT_VERSION)
-    completed += batch.length
-    repository.updateJob(jobId, { progress: chunks.length ? completed / chunks.length : 1 })
-    notifyJobsChanged()
+  const transcript = repository.getTranscript(mediaId).filter((segment) => segment.text.trim())
+  if (transcript.length === 0) throw new Error("No generated subtitles are available for Codex enrichment")
+  const transcriptVersion = repository.getTranscriptVersion(mediaId)
+  if (!transcriptVersion) throw new Error("The transcript version is unavailable")
+  const topics = await activeEnricher.enrichTranscript(transcript.map((segment) => ({
+    segmentId: segment.id,
+    text: segment.text.trim().replace(/\s+/g, " ")
+  })))
+  if (repository.getTranscriptVersion(mediaId) !== transcriptVersion) {
+    repository.requeueJob(mediaId, "enrich")
+    return
   }
-  repository.setMediaStage(mediaId, "enriched")
+  repository.replaceChunksWithTopics(mediaId, materializeTopicChunks(transcript, topics), CODEX_ENRICHMENT_VERSION)
+  try {
+    await publishSharedMetadata(repository, mediaId)
+  } catch (error) {
+    console.warn(`Shared VOD Search metadata could not be published for ${mediaId}:`, error)
+  }
   repository.updateJob(jobId, { status: "succeeded", progress: 1, error: null })
   repository.requeueJob(mediaId, "embed")
   notifyLibraryChanged()
+}
+
+function materializeTopicChunks(transcript: TranscriptSegment[], topics: TranscriptTopic[]) {
+  const positions = new Map(transcript.map((segment, index) => [segment.id, index]))
+  return topics.map((topic, index) => {
+    const startIndex = positions.get(topic.startSegmentId)
+    if (startIndex === undefined) throw new Error(`Codex topic referenced an unknown transcript segment: ${topic.startSegmentId}`)
+    const nextStartIndex = index + 1 < topics.length ? positions.get(topics[index + 1]!.startSegmentId) : transcript.length
+    if (nextStartIndex === undefined || nextStartIndex <= startIndex) throw new Error("Codex topic boundaries are not ordered")
+    const segments = transcript.slice(startIndex, nextStartIndex)
+    const last = segments.at(-1)!
+    return {
+      startMs: segments[0]!.startMs,
+      endMs: last.endMs,
+      transcript: segments.map((segment) => segment.text.trim()).join(" ").replace(/\s+/g, " "),
+      summary: topic.summary,
+      entities: topic.entities,
+      events: topic.events,
+      aliases: topic.aliases,
+      searchPhrases: topic.searchPhrases,
+      confidence: topic.confidence
+    }
+  })
 }
 
 type RuntimeExecutable = "ffmpeg" | "ffprobe" | "whisper-cli"
@@ -445,24 +517,43 @@ async function findRuntimeExecutable(name: RuntimeExecutable): Promise<string | 
   return null
 }
 
-async function findCodexExecutable(): Promise<string> {
+async function findCodexCommand(): Promise<{ executablePath: string; prefixArgs: string[] }> {
+  const prefixArgs = parseCodexPrefixArgs(process.env.VOD_SEARCH_CODEX_PREFIX_ARGS)
   const candidates = [process.env.VOD_SEARCH_CODEX_PATH, process.env.VOD_SEARCH_CODEX_MANAGED_PATH]
   for (const candidate of candidates) {
     if (!candidate) continue
-    try { await access(candidate); return candidate } catch { /* Try the next Codex location. */ }
+    try {
+      await access(candidate)
+      return {
+        executablePath: candidate,
+        prefixArgs: candidate === process.env.VOD_SEARCH_CODEX_PATH ? prefixArgs : []
+      }
+    } catch { /* Try the next Codex location. */ }
   }
-  return process.platform === "win32" ? "codex.exe" : "codex"
+  return { executablePath: process.platform === "win32" ? "codex.exe" : "codex", prefixArgs: [] }
+}
+
+function parseCodexPrefixArgs(value: string | undefined): string[] {
+  if (!value) return []
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return Array.isArray(parsed) && parsed.every((item) => typeof item === "string") ? parsed : []
+  } catch {
+    return []
+  }
 }
 
 function embeddingText(chunk: ReturnType<Repository["getChunksForEmbedding"]>[number]): string {
-  return [
-    chunk.summary ?? "",
-    chunk.transcript,
-    safeJsonText(chunk.entitiesJson),
-    safeJsonText(chunk.eventsJson),
-    safeJsonText(chunk.aliasesJson),
-    safeJsonText(chunk.searchPhrasesJson)
-  ].filter(Boolean).join("\n")
+  return buildSemanticPassage({
+    summary: chunk.summary,
+    transcript: chunk.transcript,
+    metadata: [
+      safeJsonText(chunk.searchPhrasesJson),
+      safeJsonText(chunk.aliasesJson),
+      safeJsonText(chunk.entitiesJson),
+      safeJsonText(chunk.eventsJson)
+    ]
+  })
 }
 
 function safeJsonText(value: string): string {
@@ -475,11 +566,17 @@ function safeJsonText(value: string): string {
   }
 }
 
-function startFolderScan(folderId: string, path: string): void {
+function startFolderScan(folderId: string, path: string, force = false): void {
   if (activeScans.has(folderId)) {
     rescanRequested.add(folderId)
     return
   }
+  if (!force && !isProcessingWindowOpen(repository.getProcessingSchedule().ingestion)) {
+    rescanRequested.add(folderId)
+    notifyJobsChanged()
+    return
+  }
+  rescanRequested.delete(folderId)
   const scan = scanSourceFolder(repository, folderId, path, {
     onProgress: createThrottledNotification(notifyLibraryChanged, 500)
   }).catch((error) => {
@@ -491,6 +588,33 @@ function startFolderScan(folderId: string, path: string): void {
     if (rescanRequested.delete(folderId)) startFolderScan(folderId, path)
   })
   activeScans.set(folderId, scan)
+}
+
+function drainScheduledScans(schedule: ProcessingSchedule): void {
+  if (!isProcessingWindowOpen(schedule.ingestion)) return
+  for (const folderId of [...rescanRequested]) {
+    if (activeScans.has(folderId)) continue
+    try {
+      const folder = repository.getSourceFolder(folderId)
+      startFolderScan(folder.id, folder.path)
+    } catch {
+      rescanRequested.delete(folderId)
+    }
+  }
+}
+
+async function publishSourceFolder(folderId: string): Promise<void> {
+  for (let offset = 0; ; offset += 500) {
+    const batch = repository.listMedia({ sourceFolderId: folderId, offset, limit: 500 })
+    for (const media of batch) {
+      try {
+        await publishSharedMetadata(repository, media.id)
+      } catch (error) {
+        console.warn(`Shared VOD Search metadata could not be published for ${media.id}:`, error)
+      }
+    }
+    if (batch.length < 500) return
+  }
 }
 
 function ensureFolderWatcher(folderId: string, path: string): void {
