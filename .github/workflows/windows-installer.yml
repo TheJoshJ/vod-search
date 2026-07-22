@@ -7,18 +7,24 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: windows-installer-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
 
 jobs:
   package:
-    runs-on: windows-latest
+    runs-on: windows-2025
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 11.15.1
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: pnpm
@@ -27,21 +33,17 @@ jobs:
       - run: pnpm test
       - name: Verify release version
         if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         shell: pwsh
         run: |
           $packageVersion = (Get-Content apps/desktop/package.json | ConvertFrom-Json).version
-          if ("v$packageVersion" -ne "${{ github.ref_name }}") {
-            throw "Tag ${{ github.ref_name }} must match desktop package version v$packageVersion"
+          if ("v$packageVersion" -ne $env:RELEASE_TAG) {
+            throw "Tag $env:RELEASE_TAG must match desktop package version v$packageVersion"
           }
       - name: Build installer artifact
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: pnpm package:win
-      - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: pnpm release:win
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: vod-search-windows
           path: |
@@ -49,3 +51,49 @@ jobs:
             release/*.blockmap
             release/*.yml
           if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: windows-2025
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: vod-search-windows
+          path: release
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Get-ChildItem -LiteralPath release -Filter '*.exe' |
+            Where-Object Name -NotLike '*__uninstaller*' |
+            Select-Object -First 1
+          if (-not $installer) { throw "Windows installer is missing from the build artifact" }
+
+          $safeInstaller = Join-Path $installer.DirectoryName ($installer.Name -replace ' ', '-')
+          $blockmap = "$($installer.FullName).blockmap"
+          $safeBlockmap = "$safeInstaller.blockmap"
+          if ($installer.FullName -ne $safeInstaller) {
+            Move-Item -LiteralPath $installer.FullName -Destination $safeInstaller -Force
+          }
+          if (Test-Path -LiteralPath $blockmap) {
+            Move-Item -LiteralPath $blockmap -Destination $safeBlockmap -Force
+          }
+
+          $manifest = Join-Path $installer.DirectoryName 'latest.yml'
+          if (-not (Test-Path -LiteralPath $safeBlockmap)) { throw "Installer block map is missing" }
+          if (-not (Test-Path -LiteralPath $manifest)) { throw "Update manifest is missing" }
+
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --verify-tag --generate-notes --title "VOD Search $env:RELEASE_TAG"
+            if ($LASTEXITCODE -ne 0) { throw "Could not create GitHub release" }
+          }
+          gh release upload $env:RELEASE_TAG $safeInstaller $safeBlockmap $manifest --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Could not upload GitHub release assets" }

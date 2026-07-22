@@ -7,6 +7,16 @@ embeddings, and the search index stay under the application's local data folder.
 Only untimed transcript text is sent to OpenAI when Codex creates summaries and
 search metadata; video and audio files are never uploaded by VOD Search.
 
+## Example screens
+
+### Library
+
+![VOD Search library showing indexed videos and local search status](docs/images/vod-search-library.jpg)
+
+### Video workspace
+
+![VOD Search video workspace with synchronized transcript and topic markers](docs/images/vod-search-video-workspace.jpg)
+
 ## What works
 
 - Recursively watches selected folders for common video and subtitle formats.
