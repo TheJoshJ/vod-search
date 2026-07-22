@@ -20,6 +20,17 @@ describe("subtitle parsing", () => {
     expect(result).toEqual([{ startMs: 2000, endMs: 4200, text: "I died at KK" }])
   })
 
+  it("decodes entities once before removing encoded markup", () => {
+    const result = parseSrt("1\n00:00:01,000 --> 00:00:02,000\n&lt;b&gt;Safe&lt;/b&gt; &amp;lt;literal&amp;gt;")
+    expect(result).toEqual([{ startMs: 1000, endMs: 2000, text: "Safe &lt;literal&gt;" }])
+  })
+
+  it("handles large unterminated markup without backtracking", () => {
+    const text = `{\\${"x{".repeat(20_000)}safe`
+    const result = parseSrt(`1\n00:00:01,000 --> 00:00:02,000\n${text}`)
+    expect(result[0]?.text).toBe(text)
+  })
+
   it("rejects invalid timestamps", () => {
     expect(parseTimestamp("00:61:00.000")).toBeNull()
   })

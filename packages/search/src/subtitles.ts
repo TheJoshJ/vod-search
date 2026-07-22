@@ -72,15 +72,70 @@ export function parseTimestamp(value: string): number | null {
 }
 
 function cleanSubtitleText(text: string): string {
-  return text
-    .replace(/\{\\[^}]+}/g, "")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/\s+/g, " ")
-    .trim()
+  return stripSubtitleMarkup(decodeSubtitleEntities(text)).replace(/\s+/g, " ").trim()
+}
+
+function decodeSubtitleEntities(text: string): string {
+  const entities: ReadonlyArray<readonly [string, string]> = [
+    ["&nbsp;", " "],
+    ["&amp;", "&"],
+    ["&lt;", "<"],
+    ["&gt;", ">"]
+  ]
+  let output = ""
+  for (let index = 0; index < text.length;) {
+    let decoded = false
+    if (text[index] === "&") {
+      for (const [entity, replacement] of entities) {
+        if (text.slice(index, index + entity.length).toLowerCase() !== entity) continue
+        output += replacement
+        index += entity.length
+        decoded = true
+        break
+      }
+    }
+    if (!decoded) {
+      output += text[index]
+      index += 1
+    }
+  }
+  return output
+}
+
+function stripSubtitleMarkup(text: string): string {
+  let output = ""
+  let markup: "ass" | "html" | null = null
+  let markupStart = -1
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]!
+    if (markup === "ass") {
+      if (character === "}") {
+        markup = null
+        markupStart = -1
+      }
+      continue
+    }
+    if (markup === "html") {
+      if (character === ">") {
+        markup = null
+        markupStart = -1
+      }
+      continue
+    }
+    if (character === "{" && text[index + 1] === "\\") {
+      markup = "ass"
+      markupStart = index
+      continue
+    }
+    if (character === "<") {
+      markup = "html"
+      markupStart = index
+      continue
+    }
+    output += character
+  }
+  if (markup && markupStart >= 0) output += text.slice(markupStart)
+  return output
 }
 
 function deduplicateAdjacent(segments: ParsedSubtitleSegment[]): ParsedSubtitleSegment[] {
