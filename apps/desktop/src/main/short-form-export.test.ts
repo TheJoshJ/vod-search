@@ -40,6 +40,11 @@ describe("short-form export", () => {
     expect(filter).toContain("subtitles=filename='C\\:/Temp Folder/captions.ass'")
   })
 
+  it("escapes every FFmpeg metacharacter in a Windows subtitle path", () => {
+    const filter = buildShortFormFilter(project, "C:\\Editor's Cut\\nested\\captions.ass")
+    expect(filter).toContain("subtitles=filename='C\\:/Editor\\'s Cut/nested/captions.ass'")
+  })
+
   it("emits clip-relative, word-highlighted subtitle events", () => {
     const captions = buildAssCaptions(project)
     expect(captions).toContain("PlayResX: 1080")
