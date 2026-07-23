@@ -42,7 +42,7 @@ export class IndexerClient {
     if (this.child) return
     const entry = join(__dirname, "indexer.js")
     const child = utilityProcess.fork(entry, [], {
-      serviceName: "VOD Search Indexer",
+      serviceName: "CutScout Indexer",
       env: {
         ...process.env,
         VOD_SEARCH_DB_PATH: databasePath,

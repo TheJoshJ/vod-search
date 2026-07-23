@@ -67,15 +67,15 @@ if (args[0] === "login" && args[1] === "status") {
 }
 
 if (args[args.indexOf("--model") + 1] !== "gpt-5.4-mini") throw new Error("Expected the low-cost GPT-5.4 Mini synopsis model")
-if (!args.includes('model_reasoning_effort="low"')) throw new Error("Expected low reasoning effort")
 let input = ""
 for await (const chunk of process.stdin) input += chunk
 if (args.at(-1) !== "-") throw new Error("Expected Codex to read its complete prompt from stdin")
+const outputPath = args[args.indexOf("--output-last-message") + 1]
+if (!args.includes('model_reasoning_effort="low"')) throw new Error("Expected low enrichment reasoning effort")
 const match = input.match(/<untimed_transcript_segments_json>\\s*([\\s\\S]*?)\\s*<\\/untimed_transcript_segments_json>/)
 if (!match) throw new Error("Untimed transcript JSON was missing from the Codex prompt")
 if (input.includes("startMs") || input.includes("endMs")) throw new Error("Timestamps leaked into the Codex prompt")
 const request = JSON.parse(match[1])
-const outputPath = args[args.indexOf("--output-last-message") + 1]
 const topics = [{
   startSegmentId: request.segments[0].segmentId,
   summary: "The player says they missed Resonance and died to the Kalphite King.",

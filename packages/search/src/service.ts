@@ -26,7 +26,8 @@ export interface SearchRepository {
     includeMissing: boolean,
     limit: number,
     createdAfterMs?: number,
-    createdBeforeMs?: number
+    createdBeforeMs?: number,
+    mediaIds?: string[]
   ): LexicalSearchRecord[]
   countSearchChunks(): number
   getTranscriptSegmentsInRange?(mediaId: string, startMs: number, endMs: number): TimedText[]
@@ -35,7 +36,8 @@ export interface SearchRepository {
     includeMissing: boolean,
     limit: number,
     createdAfterMs?: number,
-    createdBeforeMs?: number
+    createdBeforeMs?: number,
+    mediaIds?: string[]
   ): LexicalSearchRecord[]
 }
 
@@ -50,7 +52,8 @@ export class SearchService {
       request.includeMissing,
       100,
       request.createdAfterMs,
-      request.createdBeforeMs
+      request.createdBeforeMs,
+      request.mediaIds
     )
     const semantic = request.mode !== "keyword" && semanticEmbedding && this.repository.semanticSearch
       ? this.repository.semanticSearch(
@@ -58,7 +61,8 @@ export class SearchService {
           request.includeMissing,
           100,
           request.createdAfterMs,
-          request.createdBeforeMs
+          request.createdBeforeMs,
+          request.mediaIds
         )
       : []
     const lexicalRanks = new Map(lexical.map((row, index) => [row.chunkId, index + 1]))

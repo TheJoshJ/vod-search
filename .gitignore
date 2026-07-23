@@ -1,5 +1,6 @@
 node_modules/
 .pnpm-store/
+package-lock.json
 dist/
 out/
 release/
@@ -12,6 +13,7 @@ test-results/
 *.db
 *.db-shm
 *.db-wal
+__pycache__/
 .env
 .env.*
 !.env.example

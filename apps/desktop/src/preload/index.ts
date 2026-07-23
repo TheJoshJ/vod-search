@@ -26,8 +26,16 @@ const api: VodSearchApi = {
     revealFolder: (folderId) => ipcRenderer.invoke(ipcChannels.libraryRevealFolder, { folderId }),
     removeFolder: (folderId) => ipcRenderer.invoke(ipcChannels.libraryRemoveFolder, { folderId })
   },
+  clips: {
+    getOutputFolder: () => ipcRenderer.invoke(ipcChannels.clipsGetOutputFolder),
+    selectOutputFolder: () => ipcRenderer.invoke(ipcChannels.clipsSelectOutputFolder),
+    revealOutputFolder: () => ipcRenderer.invoke(ipcChannels.clipsRevealOutputFolder)
+  },
   search: {
     query: (input: SearchRequest) => ipcRenderer.invoke(ipcChannels.searchQuery, input)
+  },
+  shortForm: {
+    export: (project) => ipcRenderer.invoke(ipcChannels.shortFormExport, project)
   },
   jobs: {
     list: () => ipcRenderer.invoke(ipcChannels.jobsList),
@@ -42,6 +50,16 @@ const api: VodSearchApi = {
     list: () => ipcRenderer.invoke(ipcChannels.modelsList),
     download: (modelId) => ipcRenderer.invoke(ipcChannels.modelsDownload, modelId),
     cancelDownload: (modelId) => ipcRenderer.invoke(ipcChannels.modelsCancelDownload, modelId)
+  },
+  speakers: {
+    status: () => ipcRenderer.invoke(ipcChannels.speakersStatus),
+    reviewQueue: () => ipcRenderer.invoke(ipcChannels.speakersReviewQueue),
+    createProfile: (mediaSpeakerId, name) =>
+      ipcRenderer.invoke(ipcChannels.speakersCreateProfile, { mediaSpeakerId, name }),
+    assignProfile: (mediaSpeakerId, profileId) =>
+      ipcRenderer.invoke(ipcChannels.speakersAssignProfile, { mediaSpeakerId, profileId }),
+    renameProfile: (profileId, name) =>
+      ipcRenderer.invoke(ipcChannels.speakersRenameProfile, { profileId, name })
   },
   codex: {
     status: () => ipcRenderer.invoke(ipcChannels.codexStatus),

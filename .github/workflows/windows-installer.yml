@@ -92,7 +92,7 @@ jobs:
 
           gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --verify-tag --generate-notes --title "VOD Search $env:RELEASE_TAG"
+            gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --verify-tag --generate-notes --title "CutScout $env:RELEASE_TAG"
             if ($LASTEXITCODE -ne 0) { throw "Could not create GitHub release" }
           }
           gh release upload $env:RELEASE_TAG $safeInstaller $safeBlockmap $manifest --repo $env:GITHUB_REPOSITORY --clobber

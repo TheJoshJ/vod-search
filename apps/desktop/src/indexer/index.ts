@@ -1,6 +1,7 @@
 import { availableParallelism } from "node:os"
 import { dirname, extname, join, resolve } from "node:path"
-import { access, mkdir } from "node:fs/promises"
+import { access, mkdir, realpath } from "node:fs/promises"
+import { fork } from "node:child_process"
 import { openDatabase, Repository } from "@vod-search/database"
 import {
   addFolderRequestSchema,
@@ -11,7 +12,12 @@ import {
   resourceModeSchema,
   retryJobRequestSchema,
   searchRequestSchema,
+  setClipOutputFolderRequestSchema,
   setFolderSharingRequestSchema,
+  speakerAssignProfileRequestSchema,
+  speakerCreateProfileRequestSchema,
+  speakerRenameProfileRequestSchema,
+  type SpeakerAnalysis,
   type ProcessingSchedule,
   type TranscriptSegment,
   type TranscriptTopic
@@ -25,10 +31,15 @@ import {
   CodexEnricher,
   extractEmbeddedSubtitle,
   ModelManager,
+  SHERPA_ENGINE_VERSION,
+  SherpaManager,
+  getSherpaNativeLibraryPath,
+  type SherpaOptions,
+  type SherpaResult,
   probeMedia,
   transcribeWithWhisper
 } from "@vod-search/inference"
-import { scanSourceFolder } from "./scanner.js"
+import { isPathWithin, scanSourceFolder } from "./scanner.js"
 import { publishSharedMetadata } from "./shared-metadata.js"
 import { watch, type FSWatcher } from "chokidar"
 
@@ -49,6 +60,9 @@ const modelsPathFromEnvironment = process.env.VOD_SEARCH_MODELS_PATH
 if (!modelsPathFromEnvironment) throw new Error("VOD_SEARCH_MODELS_PATH is required")
 const modelsPath: string = modelsPathFromEnvironment
 const models = new ModelManager(modelsPath, undefined, notifyModelsChanged)
+const resourcesPath = process.env.VOD_SEARCH_RESOURCES_PATH
+if (!resourcesPath) throw new Error("VOD_SEARCH_RESOURCES_PATH is required")
+const sherpa = new SherpaManager(resourcesPath)
 repository.recoverRunningJobs()
 repository.cancelTranscriptionsBlockedByFailedProbe()
 let embedder: BgeEmbedder | null = null
@@ -88,7 +102,11 @@ async function dispatch(method: string, payload: unknown): Promise<unknown> {
   switch (method) {
     case "library:add-folder": {
       const input = addFolderRequestSchema.parse(payload)
-      const canonicalPath = resolve(input.path)
+      const canonicalPath = await realpath(input.path).catch(() => resolve(input.path))
+      const clipOutputFolder = repository.getClipOutputFolder()
+      if (clipOutputFolder && isPathWithin(canonicalPath, clipOutputFolder)) {
+        throw new Error("The clip output folder cannot also be added as an indexed source")
+      }
       const folder = repository.addSourceFolder(input.path, canonicalPath, input.publishSharedMetadata)
       ensureFolderWatcher(folder.id, folder.path)
       startFolderScan(folder.id, folder.path)
@@ -130,6 +148,20 @@ async function dispatch(method: string, payload: unknown): Promise<unknown> {
       notifyJobsChanged()
       return undefined
     }
+    case "clips:get-output-folder": return repository.getClipOutputFolder()
+    case "clips:set-output-folder": {
+      const input = setClipOutputFolderRequestSchema.parse(payload)
+      const canonicalPath = await realpath(input.path).catch(() => resolve(input.path))
+      for (const folder of repository.listSourceFolders()) {
+        const sourcePath = await realpath(folder.path).catch(() => resolve(folder.path))
+        if (isPathWithin(sourcePath, canonicalPath)) {
+          throw new Error("Choose a clip folder inside an indexed source, not a folder that contains the entire source")
+        }
+      }
+      const savedPath = repository.setClipOutputFolder(canonicalPath)
+      for (const folder of repository.listSourceFolders()) startFolderScan(folder.id, folder.path, true)
+      return savedPath
+    }
     case "search:query": {
       const input = searchRequestSchema.parse(payload)
       const activeEmbedder = input.mode === "keyword" ? null : await getEmbedder()
@@ -150,6 +182,26 @@ async function dispatch(method: string, payload: unknown): Promise<unknown> {
     case "models:list": return models.list()
     case "models:download": await models.install(String(payload)); return undefined
     case "models:cancel-download": models.cancel(String(payload)); return undefined
+    case "speakers:status": return sherpa.status()
+    case "speakers:review-queue": return repository.getSpeakerReviewQueue()
+    case "speakers:create-profile": {
+      const input = speakerCreateProfileRequestSchema.parse(payload)
+      const profile = repository.createSpeakerProfile(input.mediaSpeakerId, input.name)
+      notifyLibraryChanged()
+      return profile
+    }
+    case "speakers:assign-profile": {
+      const input = speakerAssignProfileRequestSchema.parse(payload)
+      repository.assignMediaSpeakerProfile(input.mediaSpeakerId, input.profileId)
+      notifyLibraryChanged()
+      return undefined
+    }
+    case "speakers:rename-profile": {
+      const input = speakerRenameProfileRequestSchema.parse(payload)
+      const profile = repository.renameSpeakerProfile(input.profileId, input.name)
+      notifyLibraryChanged()
+      return profile
+    }
     case "codex:refresh": {
       enricher = null
       nextEnricherAttemptAt = 0
@@ -162,7 +214,10 @@ async function dispatch(method: string, payload: unknown): Promise<unknown> {
       return {
         media: repository.getMedia(mediaId),
         transcript: repository.getTranscript(mediaId),
-        summaries: repository.getMediaSummaries(mediaId)
+        summaries: repository.getMediaSummaries(mediaId),
+        speakers: repository.getMediaSpeakers(mediaId),
+        speakerProfiles: repository.listSpeakerProfiles(),
+        speakerAnalysis: await getSpeakerAnalysis(mediaId)
       }
     }
     default: throw new Error(`Unknown indexer method: ${method}`)
@@ -209,10 +264,13 @@ async function runSchedulerTick(): Promise<void> {
     const ffprobePath = await findRuntimeExecutable("ffprobe")
     const ffmpegPath = await findRuntimeExecutable("ffmpeg")
     const transcriptionRuntime = await getTranscriptionRuntime(installations, ffmpegPath)
+    const diarizationRuntime = ffmpegPath ? await sherpa.runtime() : null
     const hasEmbeddingModel = installations.some((model) =>
       model.modelId === "bge-small-en-v1.5" && model.status === "installed")
     const activeEnricher = await getEnricher()
     let reconciledJobs = repository.cancelTranscriptionsBlockedByFailedProbe()
+    if (diarizationRuntime) reconciledJobs += repository.ensureDiarizationJobs(SHERPA_ENGINE_VERSION)
+    else reconciledJobs += repository.cancelPendingJobsByStage("diarize")
     if (activeEnricher) reconciledJobs += repository.ensureEnrichmentJobs(CODEX_ENRICHMENT_VERSION)
     else reconciledJobs += repository.cancelPendingJobsByStage("enrich")
     if (hasEmbeddingModel) {
@@ -226,6 +284,7 @@ async function runSchedulerTick(): Promise<void> {
     const availableStages = [
       ...(ffprobePath ? ["probe" as const] : []),
       ...(transcriptionRuntime ? ["transcribe" as const] : []),
+      ...(diarizationRuntime ? ["diarize" as const] : []),
       ...(activeEnricher ? ["enrich" as const] : []),
       ...(hasEmbeddingModel ? ["embed" as const] : [])
     ].filter((stage) => isJobStageAllowed(processingSchedule, stage, now))
@@ -238,6 +297,8 @@ async function runSchedulerTick(): Promise<void> {
         await runProbeJob(job.id, job.mediaId, ffprobePath, ffmpegPath)
       } else if (job.stage === "transcribe" && transcriptionRuntime) {
         await runTranscriptionJob(job.id, job.mediaId, transcriptionRuntime)
+      } else if (job.stage === "diarize" && diarizationRuntime && ffmpegPath) {
+        await runDiarizationJob(job.id, job.mediaId, ffmpegPath, diarizationRuntime)
       } else if (job.stage === "embed") {
         const activeEmbedder = await getEmbedder()
         if (!activeEmbedder) throw new Error("The embedding model is not installed")
@@ -256,6 +317,19 @@ async function runSchedulerTick(): Promise<void> {
     schedulerRunning = false
     notifyJobsChanged()
   }
+}
+
+async function getSpeakerAnalysis(mediaId: string): Promise<SpeakerAnalysis> {
+  if (repository.getDiarizationVersion(mediaId) === SHERPA_ENGINE_VERSION) {
+    return { state: "ready", error: null }
+  }
+  const job = repository.getMediaJob(mediaId, "diarize")
+  if (job?.status === "running") return { state: "running", error: null }
+  if (job?.status === "failed") return { state: "failed", error: job.error }
+  if (job?.status === "queued" || job?.status === "paused") return { state: "queued", error: null }
+  const engine = await sherpa.status()
+  if (engine.state === "ready") return { state: "queued", error: null }
+  return { state: "setup-required", error: engine.error }
 }
 
 interface TranscriptionRuntime {
@@ -379,7 +453,7 @@ async function runTranscriptionJob(
     whisperPath: runtime.whisperPath,
     modelPath: runtime.modelPath,
     mediaPath,
-    threads: transcriptionThreads(repository.getResourceMode()),
+    threads: diarizationThreads(repository.getResourceMode()),
     onProgress: (progress) => {
       repository.updateJob(jobId, { progress: Math.max(0.02, Math.min(0.95, progress)) })
       notifyJobsChanged()
@@ -402,6 +476,70 @@ async function runTranscriptionJob(
   notifyLibraryChanged()
 }
 
+async function runDiarizationJob(
+  jobId: string,
+  mediaId: string,
+  ffmpegPath: string,
+  runtime: NonNullable<Awaited<ReturnType<SherpaManager["runtime"]>>>
+): Promise<void> {
+  const mediaPath = repository.getMediaPath(mediaId)
+  if (!mediaPath) throw new Error("The media file is no longer available")
+  const fingerprint = repository.getMedia(mediaId).quickFingerprint
+  const result = await runSherpaWorker({
+    ...runtime,
+    ffmpegPath,
+    mediaPath,
+    threads: transcriptionThreads(repository.getResourceMode()),
+    onProgress: (progress) => {
+      repository.updateJob(jobId, { progress: Math.max(0.02, Math.min(0.95, progress)) })
+      notifyJobsChanged()
+    }
+  })
+  if (repository.getMedia(mediaId).quickFingerprint !== fingerprint) {
+    repository.requeueJob(mediaId, "diarize")
+    return
+  }
+  repository.replaceSpeakerDiarization(mediaId, SHERPA_ENGINE_VERSION, result.speakers, result.turns)
+  repository.updateJob(jobId, { status: "succeeded", progress: 1, error: null })
+  notifyLibraryChanged()
+}
+
+function runSherpaWorker(options: Omit<SherpaOptions, "signal">): Promise<SherpaResult> {
+  const { onProgress, ...workerData } = options
+  return new Promise((resolve, reject) => {
+    const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH"
+    const worker = fork(join(__dirname, "sherpa-worker.js"), [], {
+      execPath: process.execPath,
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: "1",
+        [pathKey]: `${getSherpaNativeLibraryPath()};${process.env[pathKey] ?? ""}`
+      },
+      serialization: "advanced",
+      stdio: ["ignore", "ignore", "pipe", "ipc"]
+    })
+    let settled = false
+    let stderr = ""
+    const finish = (callback: () => void): void => {
+      if (settled) return
+      settled = true
+      callback()
+    }
+    worker.stderr?.setEncoding("utf8")
+    worker.stderr?.on("data", (chunk: string) => { stderr += chunk })
+    worker.on("message", (message: { type: string; progress?: number; result?: SherpaResult; error?: string }) => {
+      if (message.type === "progress" && message.progress !== undefined) onProgress?.(message.progress)
+      else if (message.type === "result" && message.result) finish(() => resolve(message.result!))
+      else if (message.type === "error") finish(() => reject(new Error(message.error ?? "Sherpa diarization failed")))
+    })
+    worker.on("error", (error) => finish(() => reject(error)))
+    worker.on("exit", (code) => {
+      if (code !== 0) finish(() => reject(new Error(`Sherpa diarization process exited with code ${code}: ${stderr.slice(-1_000)}`)))
+    })
+    worker.send(workerData)
+  })
+}
+
 function preferredSubtitle(
   subtitles: Array<{ streamIndex: number; language: string | null; title: string | null }>
 ): { streamIndex: number; language: string | null; title: string | null } {
@@ -413,6 +551,13 @@ function transcriptionThreads(mode: "low" | "normal" | "high"): number {
   if (mode === "low") return Math.min(2, cores)
   if (mode === "high") return Math.max(1, cores - 1)
   return Math.max(1, Math.min(6, Math.ceil(cores / 2)))
+}
+
+function diarizationThreads(mode: "low" | "normal" | "high"): number {
+  const cores = Math.max(1, availableParallelism())
+  if (mode === "low") return 1
+  if (mode === "high") return Math.min(4, cores)
+  return Math.min(2, cores)
 }
 
 async function runEmbeddingJob(jobId: string, mediaId: string, activeEmbedder: BgeEmbedder): Promise<void> {
@@ -464,7 +609,7 @@ async function runEnrichmentJob(jobId: string, mediaId: string, activeEnricher: 
   try {
     await publishSharedMetadata(repository, mediaId)
   } catch (error) {
-    console.warn(`Shared VOD Search metadata could not be published for ${mediaId}:`, error)
+    console.warn(`Shared CutScout metadata could not be published for ${mediaId}:`, error)
   }
   repository.updateJob(jobId, { status: "succeeded", progress: 1, error: null })
   repository.requeueJob(mediaId, "embed")
@@ -578,7 +723,8 @@ function startFolderScan(folderId: string, path: string, force = false): void {
   }
   rescanRequested.delete(folderId)
   const scan = scanSourceFolder(repository, folderId, path, {
-    onProgress: createThrottledNotification(notifyLibraryChanged, 500)
+    onProgress: createThrottledNotification(notifyLibraryChanged, 500),
+    excludedPaths: [repository.getClipOutputFolder()].filter((value): value is string => Boolean(value))
   }).catch((error) => {
     console.error(`Failed to scan source folder ${path}:`, error)
   }).finally(() => {
@@ -610,7 +756,7 @@ async function publishSourceFolder(folderId: string): Promise<void> {
       try {
         await publishSharedMetadata(repository, media.id)
       } catch (error) {
-        console.warn(`Shared VOD Search metadata could not be published for ${media.id}:`, error)
+        console.warn(`Shared CutScout metadata could not be published for ${media.id}:`, error)
       }
     }
     if (batch.length < 500) return
@@ -627,6 +773,8 @@ function ensureFolderWatcher(folderId: string, path: string): void {
   })
   const changed = (changedPath: string): void => {
     if (!isRelevantLibraryPath(changedPath)) return
+    const clipOutputFolder = repository.getClipOutputFolder()
+    if (clipOutputFolder && isPathWithin(changedPath, clipOutputFolder)) return
     const previous = rescanTimers.get(folderId)
     if (previous) clearTimeout(previous)
     const timer = setTimeout(() => {

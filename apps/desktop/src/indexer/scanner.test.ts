@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -67,6 +67,30 @@ describe("scanSourceFolder", () => {
       await scanSourceFolder(repository, folder.id, root)
 
       expect(repository.listJobs().map((job) => job.stage)).toEqual(["probe"])
+    } finally {
+      database.close()
+    }
+  })
+
+  it("ignores a configured clip output folder and removes previously indexed clips from active results", async () => {
+    const root = await mkdtemp(join(tmpdir(), "vod-search-scan-"))
+    temporaryPaths.push(root)
+    const clipOutputFolder = join(root, "CutScout Clips")
+    await mkdir(clipOutputFolder)
+    await writeFile(join(root, "source.mp4"), Buffer.from("source media bytes"))
+    await writeFile(join(clipOutputFolder, "exported-clip.mp4"), Buffer.from("exported clip bytes"))
+
+    const database = openDatabase(":memory:")
+    try {
+      const repository = new Repository(database.db)
+      const folder = repository.addSourceFolder(root, root)
+      await scanSourceFolder(repository, folder.id, root)
+      expect(repository.listMedia({ sourceFolderId: folder.id, offset: 0, limit: 10 })).toHaveLength(2)
+
+      await scanSourceFolder(repository, folder.id, root, { excludedPaths: [clipOutputFolder] })
+      const media = repository.listMedia({ sourceFolderId: folder.id, offset: 0, limit: 10 })
+      expect(media.find((item) => item.displayName === "source.mp4")?.availability).toBe("available")
+      expect(media.find((item) => item.displayName === "exported-clip.mp4")?.availability).toBe("missing")
     } finally {
       database.close()
     }

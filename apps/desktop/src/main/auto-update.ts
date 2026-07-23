@@ -26,14 +26,14 @@ export function registerAutoUpdates(
     try {
       await autoUpdater.checkForUpdates()
     } catch (error) {
-      console.warn("VOD Search could not check for updates:", error)
+      console.warn("CutScout could not check for updates:", error)
     } finally {
       checking = false
     }
   }
 
   const onError = (error: Error): void => {
-    console.warn("VOD Search auto-update failed:", error)
+    console.warn("CutScout auto-update failed:", error)
   }
 
   const onDownloaded = (update: UpdateDownloadedEvent): void => {
@@ -63,8 +63,8 @@ export function registerAutoUpdates(
 async function showUpdateReady(version: string, mainWindow: BrowserWindow | null): Promise<void> {
   const options = {
     type: "info" as const,
-    title: "VOD Search update ready",
-    message: `VOD Search ${version} has been downloaded.`,
+    title: "CutScout update ready",
+    message: `CutScout ${version} has been downloaded.`,
     detail: "Restart now to finish installing it, or choose Later to install when you next close the app.",
     buttons: ["Restart now", "Later"],
     defaultId: 0,

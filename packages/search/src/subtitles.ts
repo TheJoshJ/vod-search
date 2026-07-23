@@ -160,6 +160,7 @@ export function toTranscriptSegments(
     mediaId,
     source,
     confidence: null,
+    mediaSpeakerId: null,
     ...segment
   }))
 }

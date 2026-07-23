@@ -1,6 +1,6 @@
 # Third-party runtime notices
 
-VOD Search downloads and packages the following unmodified runtime builds. Their
+CutScout downloads and packages the following unmodified runtime builds. Their
 source code and build instructions remain available from the linked projects.
 
 ## FFmpeg

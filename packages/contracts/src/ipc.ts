@@ -7,10 +7,14 @@ import {
   mediaDetailSchema,
   modelInstallationSchema,
   resourceModeSchema,
+  speakerEngineStatusSchema,
+  speakerProfileSchema,
+  speakerReviewQueueSchema,
   sourceFolderSchema
 } from "./domain.js"
 import { searchRequestSchema, searchResponseSchema } from "./search.js"
 import { processingScheduleSchema } from "./schedule.js"
+import { shortFormExportResponseSchema, shortFormProjectSchema } from "./short-form.js"
 
 export const ipcChannels = {
   librarySelectFolder: "library:select-folder",
@@ -22,7 +26,11 @@ export const ipcChannels = {
   libraryRescanFolder: "library:rescan-folder",
   libraryRevealFolder: "library:reveal-folder",
   libraryRemoveFolder: "library:remove-folder",
+  clipsGetOutputFolder: "clips:get-output-folder",
+  clipsSelectOutputFolder: "clips:select-output-folder",
+  clipsRevealOutputFolder: "clips:reveal-output-folder",
   searchQuery: "search:query",
+  shortFormExport: "short-form:export",
   jobsList: "jobs:list",
   jobsRetry: "jobs:retry",
   jobsPauseAll: "jobs:pause-all",
@@ -42,6 +50,11 @@ export const ipcChannels = {
   mediaOpenExternal: "media:open-external",
   mediaOpenExternalAt: "media:open-external-at",
   mediaExportClip: "media:export-clip",
+  speakersStatus: "speakers:status",
+  speakersReviewQueue: "speakers:review-queue",
+  speakersCreateProfile: "speakers:create-profile",
+  speakersAssignProfile: "speakers:assign-profile",
+  speakersRenameProfile: "speakers:rename-profile",
   eventLibraryChanged: "event:library-changed",
   eventJobsChanged: "event:jobs-changed",
   eventModelsChanged: "event:models-changed",
@@ -57,6 +70,8 @@ export const setFolderSharingRequestSchema = z.object({
   publishSharedMetadata: z.boolean()
 })
 export const sourceFolderRequestSchema = z.object({ folderId: z.string().min(1) })
+export const clipOutputFolderSchema = z.string().min(1).nullable()
+export const setClipOutputFolderRequestSchema = z.object({ path: z.string().min(1) })
 export const listMediaRequestSchema = z.object({
   sourceFolderId: z.string().optional(),
   offset: z.number().int().nonnegative().default(0),
@@ -80,6 +95,18 @@ export const mediaExportClipRequestSchema = z.object({
   path: ["endMs"]
 })
 export const mediaExportClipResponseSchema = z.object({ path: z.string().nullable() })
+export const speakerCreateProfileRequestSchema = z.object({
+  mediaSpeakerId: z.number().int().positive(),
+  name: z.string().trim().min(1).max(80)
+})
+export const speakerAssignProfileRequestSchema = z.object({
+  mediaSpeakerId: z.number().int().positive(),
+  profileId: z.string().uuid().nullable()
+})
+export const speakerRenameProfileRequestSchema = z.object({
+  profileId: z.string().uuid(),
+  name: z.string().trim().min(1).max(80)
+})
 export const retryJobRequestSchema = z.object({ jobId: z.string().uuid() })
 export const mediaPlaybackResponseSchema = z.object({
   url: z.string(),
@@ -98,8 +125,16 @@ export interface VodSearchApi {
     revealFolder(folderId: string): Promise<void>
     removeFolder(folderId: string): Promise<void>
   }
+  clips: {
+    getOutputFolder(): Promise<z.infer<typeof clipOutputFolderSchema>>
+    selectOutputFolder(): Promise<z.infer<typeof clipOutputFolderSchema>>
+    revealOutputFolder(): Promise<void>
+  }
   search: {
     query(input: z.input<typeof searchRequestSchema>): Promise<z.infer<typeof searchResponseSchema>>
+  }
+  shortForm: {
+    export(project: z.input<typeof shortFormProjectSchema>): Promise<z.infer<typeof shortFormExportResponseSchema>>
   }
   jobs: {
     list(): Promise<Array<z.infer<typeof jobSchema>>>
@@ -127,6 +162,13 @@ export interface VodSearchApi {
     openExternal(mediaId: string): Promise<z.infer<typeof mediaExternalOpenResponseSchema>>
     openExternalAt(mediaId: string, startMs: number): Promise<z.infer<typeof mediaExternalOpenResponseSchema>>
     exportClip(mediaId: string, startMs: number, endMs: number): Promise<z.infer<typeof mediaExportClipResponseSchema>>
+  }
+  speakers: {
+    status(): Promise<z.infer<typeof speakerEngineStatusSchema>>
+    reviewQueue(): Promise<z.infer<typeof speakerReviewQueueSchema>>
+    createProfile(mediaSpeakerId: number, name: string): Promise<z.infer<typeof speakerProfileSchema>>
+    assignProfile(mediaSpeakerId: number, profileId: string | null): Promise<void>
+    renameProfile(profileId: string, name: string): Promise<z.infer<typeof speakerProfileSchema>>
   }
   events: {
     onLibraryChanged(listener: () => void): () => void

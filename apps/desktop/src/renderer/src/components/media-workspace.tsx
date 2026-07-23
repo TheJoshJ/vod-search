@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import type { MediaDetail, SearchHit } from "@vod-search/contracts"
-import { ArrowLeft, CalendarDays, ChevronLeft, ChevronRight, CircleAlert, Download, Eye, FileText, LoaderCircle, Scissors, Search, Sparkles } from "lucide-react"
+import type { MediaDetail, SearchHit, ShortFormProject } from "@vod-search/contracts"
+import { ArrowLeft, CalendarDays, ChevronLeft, ChevronRight, CircleAlert, FileText, LoaderCircle, Search, Sparkles, Users } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Popover, PopoverContent, PopoverDescription, PopoverHeader, PopoverTitle, PopoverTrigger } from "@/components/ui/popover"
-import { Slider } from "@/components/ui/slider"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { formatDate, formatTimestamp, stageLabel } from "@/lib/format"
 import { cn } from "@/lib/utils"
+import { ClipComposer } from "./clip-composer"
+import { SpeakersPanel, TranscriptSpeakerAssignment } from "./media-speaker-panel"
 import { areDisplayTextsEquivalent } from "./search-presentation"
 import { cleanMediaTitle, splitQueryMatches } from "./search-workflow"
+import { createShortFormProject } from "./short-form-project"
 import { clusterTimelinePoints } from "./timeline-presentation"
 import { findActiveTranscriptSegmentId, getTranscriptFollowScrollTop } from "./transcript-follow"
 
@@ -18,6 +21,7 @@ export interface MediaWorkspaceSelection {
   initialMs?: number
   markers?: SearchHit[]
   query?: string
+  returnLabel?: string
 }
 
 interface TimelineMarker {
@@ -30,11 +34,14 @@ interface TimelineMarker {
 
 export function MediaWorkspace({
   selection,
-  onClose
+  onClose,
+  onEditShort
 }: {
   selection: MediaWorkspaceSelection
   onClose: () => void
+  onEditShort: (project: ShortFormProject) => void
 }): React.JSX.Element {
+  const returnLabel = selection.returnLabel ?? "library"
   const videoRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const transcriptScrollRef = useRef<HTMLDivElement>(null)
@@ -53,6 +60,7 @@ export function MediaWorkspace({
   const [markerKinds, setMarkerKinds] = useState<Array<TimelineMarker["kind"]>>(
     selection.query ? ["match"] : ["summary"]
   )
+  const [sidebarTab, setSidebarTab] = useState<"transcript" | "speakers">("transcript")
 
   useEffect(() => {
     let cancelled = false
@@ -65,6 +73,7 @@ export function MediaWorkspace({
     setCurrentMs(initialMs)
     setActualDurationMs(0)
     setMarkerKinds(selection.query ? ["match"] : ["summary"])
+    setSidebarTab("transcript")
     previewEndRef.current = null
     lastFollowedSegmentRef.current = null
     transcriptRowsRef.current.clear()
@@ -83,6 +92,12 @@ export function MediaWorkspace({
     return () => { cancelled = true }
   }, [selection])
 
+  useEffect(() => window.vodSearch.events.onLibraryChanged(() => {
+    void window.vodSearch.media.getDetail(selection.mediaId).then(setDetail).catch((reason: unknown) => {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    })
+  }), [selection.mediaId])
+
   const durationMs = Math.max(1, actualDurationMs || detail?.media.durationMs || 1)
   const markers = useMemo(() => buildMarkers(detail, selection.markers ?? []), [detail, selection.markers])
   const visibleMarkers = useMemo(() => markers.filter((marker) => markerKinds.includes(marker.kind)), [markerKinds, markers])
@@ -93,9 +108,10 @@ export function MediaWorkspace({
     () => detail ? findActiveTranscriptSegmentId(detail.transcript, currentMs) : null,
     [currentMs, detail]
   )
+  const speakersById = useMemo(() => new Map(detail?.speakers.map((speaker) => [speaker.id, speaker]) ?? []), [detail?.speakers])
 
   useEffect(() => {
-    if (activeSegmentId === null || lastFollowedSegmentRef.current === activeSegmentId) return
+    if (sidebarTab !== "transcript" || activeSegmentId === null || lastFollowedSegmentRef.current === activeSegmentId) return
 
     const container = transcriptScrollRef.current
     const row = transcriptRowsRef.current.get(activeSegmentId)
@@ -118,7 +134,7 @@ export function MediaWorkspace({
       top: nextScrollTop,
       behavior: scrubbingRef.current ? "auto" : "smooth"
     })
-  }, [activeSegmentId])
+  }, [activeSegmentId, sidebarTab])
 
   function seekTo(milliseconds: number): void {
     previewEndRef.current = null
@@ -143,6 +159,10 @@ export function MediaWorkspace({
     seekTo(startMs)
     previewEndRef.current = endMs
     void videoRef.current?.play().catch(() => undefined)
+  }
+
+  async function refreshDetail(): Promise<void> {
+    setDetail(await window.vodSearch.media.getDetail(selection.mediaId))
   }
 
   function beginScrub(): void {
@@ -184,7 +204,7 @@ export function MediaWorkspace({
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
       <header className="flex h-16 shrink-0 items-center gap-3 border-b px-3">
-        <Button variant="ghost" size="icon-sm" aria-label="Back to library" onClick={onClose}><ArrowLeft /></Button>
+        <Button variant="ghost" size="icon-sm" aria-label={`Back to ${returnLabel}`} onClick={onClose}><ArrowLeft /></Button>
         <div className="min-w-0 flex-1 border-l pl-3">
           <h1 className="truncate text-sm font-semibold tracking-tight" title={detail?.media.displayName ?? selection.title}>{cleanMediaTitle(detail?.media.displayName ?? selection.title)}</h1>
           <div className="mt-0.5 flex min-w-0 items-center gap-3 text-[10px] text-muted-foreground">
@@ -202,6 +222,7 @@ export function MediaWorkspace({
             durationMs={durationMs}
             disabled={!playbackUrl}
             onPreview={previewRange}
+            onEditShort={(startMs, endMs) => onEditShort(createShortFormProject(detail, startMs, endMs))}
           />
         )}
       </header>
@@ -220,7 +241,7 @@ export function MediaWorkspace({
       {loading ? (
         <div className="grid min-h-0 flex-1 place-items-center text-muted-foreground"><LoaderCircle className="size-5 animate-spin" /></div>
       ) : error ? (
-        <div className="grid min-h-0 flex-1 place-items-center p-8"><div className="max-w-sm text-center"><CircleAlert className="mx-auto size-6 text-destructive" /><p className="mt-3 text-sm font-semibold">Couldn’t open this video</p><p className="mt-2 text-xs leading-5 text-muted-foreground">{error}</p><Button variant="outline" size="sm" className="mt-4" onClick={onClose}>Back to library</Button></div></div>
+        <div className="grid min-h-0 flex-1 place-items-center p-8"><div className="max-w-sm text-center"><CircleAlert className="mx-auto size-6 text-destructive" /><p className="mt-3 text-sm font-semibold">Couldn’t open this video</p><p className="mt-2 text-xs leading-5 text-muted-foreground">{error}</p><Button variant="outline" size="sm" className="mt-4" onClick={onClose}>Back to {returnLabel}</Button></div></div>
       ) : detail ? (
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(20rem,25rem)] max-[1050px]:grid-cols-[minmax(0,1fr)_20rem]">
           <main className="min-h-0 overflow-y-auto bg-muted/15">
@@ -338,128 +359,39 @@ export function MediaWorkspace({
             </section>
           </main>
 
-          <aside className="flex min-h-0 flex-col border-l bg-background">
-            <div className="flex h-11 shrink-0 items-center justify-between border-b px-3">
-              <div><h2 className="text-xs font-semibold">Transcript</h2><p className="mt-0.5 text-[9px] text-muted-foreground">Follows playback · select a line to seek</p></div>
-              <span className="font-mono text-[9px] text-muted-foreground">{detail.transcript.length} segments</span>
-            </div>
-            <div ref={transcriptScrollRef} className="min-h-0 flex-1 overflow-y-auto">
-              {detail.transcript.length === 0 ? (
-                <div className="grid min-h-48 place-items-center px-5 text-center"><div><FileText className="mx-auto size-4 text-muted-foreground" /><p className="mt-3 text-xs font-semibold">No transcript yet</p><p className="mt-1 text-[10px] leading-4 text-muted-foreground">This video is waiting for subtitles or local transcription.</p></div></div>
-              ) : detail.transcript.map((segment) => {
-                const queryMatch = Boolean(selection.query && searchMatches.some((marker) => rangesOverlap(marker, segment)))
-                return (
-                <button
-                  type="button"
-                  key={segment.id}
-                  ref={(node) => {
-                    if (node) transcriptRowsRef.current.set(segment.id, node)
-                    else transcriptRowsRef.current.delete(segment.id)
-                  }}
-                  data-active={activeSegmentId === segment.id}
-                  aria-current={activeSegmentId === segment.id ? "true" : undefined}
-                  onClick={() => seekTo(segment.startMs)}
-                  className={cn("grid w-full cursor-pointer grid-cols-[3.5rem_minmax(0,1fr)] gap-2 border-b border-l-2 border-l-transparent border-r-2 border-r-transparent px-3 py-2.5 text-left transition-colors hover:bg-accent/35 focus-visible:bg-accent/35 focus-visible:outline-none", queryMatch && "border-r-chart-3 bg-chart-3/10", activeSegmentId === segment.id && "border-l-primary bg-accent/65")}
-                >
-                  <span className={cn("font-mono text-[9px] font-medium tabular-nums text-primary", activeSegmentId === segment.id && "font-semibold")}>{formatTimestamp(segment.startMs)}</span>
-                  <span className={cn("text-[11px] leading-[1.45] text-foreground/90", activeSegmentId === segment.id && "font-medium text-foreground")}><HighlightedTranscriptText text={segment.text} query={selection.query} /></span>
-                </button>
-                )
-              })}
-            </div>
+          <aside className="min-h-0 border-l bg-background">
+            <Tabs value={sidebarTab} onValueChange={(value) => setSidebarTab(value as "transcript" | "speakers")} className="h-full min-h-0 gap-0">
+              <div className="flex h-11 shrink-0 items-center border-b px-2">
+                <TabsList className="h-8 w-full rounded-none bg-transparent p-0">
+                  <TabsTrigger value="transcript" className="h-8 rounded-none px-2 text-[11px] shadow-none data-[state=active]:border-x-0 data-[state=active]:border-b-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"><FileText />Transcript <span className="font-mono text-[9px] text-muted-foreground">{detail.transcript.length}</span></TabsTrigger>
+                  <TabsTrigger value="speakers" className="h-8 rounded-none px-2 text-[11px] shadow-none data-[state=active]:border-x-0 data-[state=active]:border-b-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"><Users />Speakers <span className="font-mono text-[9px] text-muted-foreground">{detail.speakers.length}</span></TabsTrigger>
+                </TabsList>
+              </div>
+              <TabsContent value="transcript" className="min-h-0 overflow-hidden">
+                <div ref={transcriptScrollRef} className="h-full overflow-y-auto">
+                  {detail.transcript.length === 0 ? (
+                    <div className="grid min-h-48 place-items-center px-5 text-center"><div><FileText className="mx-auto size-4 text-muted-foreground" /><p className="mt-3 text-xs font-semibold">No transcript yet</p><p className="mt-1 text-[10px] leading-4 text-muted-foreground">This video is waiting for subtitles or local transcription.</p></div></div>
+                  ) : detail.transcript.map((segment) => {
+                    const queryMatch = Boolean(selection.query && searchMatches.some((marker) => rangesOverlap(marker, segment)))
+                    const speaker = segment.mediaSpeakerId ? speakersById.get(segment.mediaSpeakerId) : undefined
+                    return (
+                      <div key={segment.id} className={cn("group relative border-b border-l-2 border-l-transparent border-r-2 border-r-transparent transition-colors hover:bg-accent/35", queryMatch && "border-r-chart-3 bg-chart-3/10", activeSegmentId === segment.id && "border-l-primary bg-accent/65")}>
+                        <button type="button" ref={(node) => { if (node) transcriptRowsRef.current.set(segment.id, node); else transcriptRowsRef.current.delete(segment.id) }} data-active={activeSegmentId === segment.id} aria-current={activeSegmentId === segment.id ? "true" : undefined} aria-label={`Seek to ${formatTimestamp(segment.startMs)}: ${segment.text}`} onClick={() => seekTo(segment.startMs)} className="grid w-full cursor-pointer grid-cols-[3.5rem_minmax(0,1fr)] gap-2 px-3 py-2.5 text-left focus-visible:bg-accent/35 focus-visible:outline-none">
+                          <span className={cn("font-mono text-[9px] font-medium tabular-nums text-primary", activeSegmentId === segment.id && "font-semibold")}>{formatTimestamp(segment.startMs)}</span>
+                          <span className="min-w-0">{speaker && <span aria-hidden="true" className="mb-1 block h-5" />}<span className={cn("block text-[11px] leading-[1.45] text-foreground/90", activeSegmentId === segment.id && "font-medium text-foreground")}><HighlightedTranscriptText text={segment.text} query={selection.query} /></span></span>
+                        </button>
+                        {speaker && <div className="absolute left-[4.5rem] right-2 top-1.5 flex min-w-0 items-center"><TranscriptSpeakerAssignment speaker={speaker} profiles={detail.speakerProfiles} onChanged={refreshDetail} onError={(reason) => setError(reason instanceof Error ? reason.message : String(reason))} /></div>}
+                      </div>
+                    )
+                  })}
+                </div>
+              </TabsContent>
+              <TabsContent value="speakers" className="min-h-0 overflow-y-auto"><SpeakersPanel detail={detail} onChanged={refreshDetail} onError={(reason) => setError(reason instanceof Error ? reason.message : String(reason))} /></TabsContent>
+            </Tabs>
           </aside>
         </div>
       ) : null}
     </div>
-  )
-}
-
-function ClipComposer({
-  mediaId,
-  currentMs,
-  durationMs,
-  disabled,
-  onPreview
-}: {
-  mediaId: string
-  currentMs: number
-  durationMs: number
-  disabled: boolean
-  onPreview: (startMs: number, endMs: number) => void
-}): React.JSX.Element {
-  const [open, setOpen] = useState(false)
-  const [range, setRange] = useState<[number, number]>(() => defaultClipRange(currentMs, durationMs))
-  const [exporting, setExporting] = useState(false)
-  const [exportedPath, setExportedPath] = useState<string | null>(null)
-  const [exportError, setExportError] = useState<string | null>(null)
-
-  function chooseDuration(milliseconds: number): void {
-    const startMs = Math.min(currentMs, Math.max(0, durationMs - 1_000))
-    setRange([startMs, Math.min(durationMs, startMs + milliseconds)])
-  }
-
-  async function exportClip(): Promise<void> {
-    setExporting(true)
-    setExportError(null)
-    try {
-      const result = await window.vodSearch.media.exportClip(mediaId, range[0], range[1])
-      if (result.path) setExportedPath(result.path)
-    } catch (reason) {
-      setExportError(reason instanceof Error ? reason.message : String(reason))
-    } finally {
-      setExporting(false)
-    }
-  }
-
-  return (
-    <Popover open={open} onOpenChange={(nextOpen) => {
-      setOpen(nextOpen)
-      if (nextOpen) {
-        setRange(defaultClipRange(currentMs, durationMs))
-        setExportError(null)
-      }
-    }}>
-      <PopoverTrigger asChild>
-        <Button variant="outline" size="sm" disabled={disabled}><Scissors />Clip</Button>
-      </PopoverTrigger>
-      <PopoverContent align="end" className="w-80">
-        <PopoverHeader>
-          <PopoverTitle>Export a clip</PopoverTitle>
-          <PopoverDescription>Choose a precise range, preview it, then save a new MP4.</PopoverDescription>
-        </PopoverHeader>
-        <div className="mt-4 space-y-4">
-          <div className="flex items-center justify-between font-mono text-[10px] tabular-nums">
-            <span>{formatTimestamp(range[0])}</span>
-            <span className="text-muted-foreground">{formatTimestamp(range[1] - range[0])} clip</span>
-            <span>{formatTimestamp(range[1])}</span>
-          </div>
-          <Slider
-            min={0}
-            max={durationMs}
-            step={250}
-            value={range}
-            minStepsBetweenThumbs={4}
-            onValueChange={(value) => setRange([value[0] ?? 0, value[1] ?? durationMs])}
-            aria-label="Clip start and end"
-          />
-          <div className="flex items-center gap-1.5">
-            <span className="mr-auto text-[10px] text-muted-foreground">From playhead</span>
-            <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => chooseDuration(15_000)}>15s</Button>
-            <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => chooseDuration(30_000)}>30s</Button>
-            <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => chooseDuration(60_000)}>60s</Button>
-          </div>
-          {exportedPath && <p className="truncate text-[10px] text-muted-foreground" title={exportedPath}>Saved {exportedPath.split(/[\\/]/).at(-1)}</p>}
-          {exportError && <p className="text-[10px] leading-4 text-destructive">{exportError}</p>}
-          <div className="flex justify-end gap-2 border-t pt-3">
-            <Button variant="outline" size="sm" onClick={() => onPreview(range[0], range[1])}><Eye />Preview</Button>
-            <Button size="sm" disabled={exporting || range[1] - range[0] < 1_000} onClick={() => void exportClip()}>
-              {exporting ? <LoaderCircle className="animate-spin" /> : <Download />}
-              {exporting ? "Exporting" : "Export MP4"}
-            </Button>
-          </div>
-        </div>
-      </PopoverContent>
-    </Popover>
   )
 }
 
@@ -468,11 +400,6 @@ function HighlightedTranscriptText({ text, query }: { text: string; query?: stri
   return <>{splitQueryMatches(text, query).map((part, index) => part.match
     ? <mark key={`${part.text}:${index}`} className="rounded-sm bg-chart-3/25 px-0.5 text-inherit">{part.text}</mark>
     : <span key={`${part.text}:${index}`}>{part.text}</span>)}</>
-}
-
-function defaultClipRange(currentMs: number, durationMs: number): [number, number] {
-  const startMs = Math.min(Math.max(0, currentMs - 5_000), Math.max(0, durationMs - 1_000))
-  return [startMs, Math.min(durationMs, startMs + 30_000)]
 }
 
 function findClosestMarkerIndex(markers: TimelineMarker[], currentMs: number): number {
@@ -516,23 +443,4 @@ function buildMarkers(detail: MediaDetail | null, searchHits: SearchHit[]): Time
 
 function rangesOverlap(left: { startMs: number; endMs: number }, right: { startMs: number; endMs: number }): boolean {
   return left.startMs <= right.endMs && right.startMs <= left.endMs
-}
-
-function formatTimestamp(milliseconds: number): string {
-  const seconds = Math.max(0, Math.floor(milliseconds / 1000))
-  const hours = Math.floor(seconds / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
-  const remainder = seconds % 60
-  return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}` : `${minutes}:${String(remainder).padStart(2, "0")}`
-}
-
-function formatDate(milliseconds: number): string {
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(milliseconds)
-}
-
-function stageLabel(stage: MediaDetail["media"]["highestCompletedStage"]): string {
-  if (stage === "ready") return "Ready"
-  if (stage === "embedded" || stage === "enriched") return "Searchable"
-  if (stage === "chunked") return "Indexed"
-  return stage.replaceAll("_", " ").replace(/^./, (character) => character.toUpperCase())
 }

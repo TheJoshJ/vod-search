@@ -17,7 +17,8 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve("src/main/index.ts"),
-          indexer: resolve("src/indexer/index.ts")
+          indexer: resolve("src/indexer/index.ts"),
+          "sherpa-worker": resolve("src/indexer/sherpa-worker.ts")
         }
       }
     }
