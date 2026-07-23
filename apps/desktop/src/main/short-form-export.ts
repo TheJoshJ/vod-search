@@ -202,7 +202,11 @@ function escapeAssText(value: string): string {
 }
 
 function escapeFilterPath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'")
+  return path
+    .replace(/\\/g, "/")
+    .replace(/\\/g, "\\\\")
+    .replace(/:/g, "\\:")
+    .replace(/'/g, "\\'")
 }
 
 function seconds(milliseconds: number): string {
