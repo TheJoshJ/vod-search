@@ -1,4 +1,5 @@
 const { app } = require("electron")
+const { existsSync } = require("node:fs")
 const { createRequire } = require("node:module")
 const { join } = require("node:path")
 const { pathToFileURL } = require("node:url")
@@ -6,6 +7,13 @@ const { pathToFileURL } = require("node:url")
 const databaseRequire = createRequire(join(__dirname, "..", "packages", "database", "package.json"))
 const Database = databaseRequire("better-sqlite3")
 const sqliteVec = databaseRequire("sqlite-vec")
+
+function appDataRoot() {
+  const localAppData = process.env.LOCALAPPDATA || ""
+  const current = join(localAppData, "CutScout")
+  const legacy = join(localAppData, ["VOD", "Search"].join(" "))
+  return existsSync(current) || !existsSync(legacy) ? current : legacy
+}
 
 function timestamp(milliseconds) {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000))
@@ -22,15 +30,14 @@ async function main() {
   if (!query) throw new Error("Usage: electron scripts/inspect-live-search.cjs <query>")
 
   const root = join(__dirname, "..")
+  const dataRoot = appDataRoot()
   const databasePath = process.env.VOD_SEARCH_DB || join(
-    process.env.LOCALAPPDATA || "",
-    "VOD Search",
+    dataRoot,
     "index",
     "vod-search.db"
   )
   const modelPath = process.env.VOD_SEARCH_BGE_PATH || join(
-    process.env.LOCALAPPDATA || "",
-    "VOD Search",
+    dataRoot,
     "models",
     "bge-small-en-v1.5",
     "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"

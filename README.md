@@ -1,21 +1,21 @@
-# VOD Search
+# CutScout
 
-VOD Search is a Windows-first video transcript search application. It indexes existing subtitles or local Whisper transcripts, identifies recurring speakers locally with bundled Sherpa ONNX models, asks Codex to enrich natural transcript topics, and combines full-text and semantic search.
+CutScout is a Windows-first video transcript search application. It indexes existing subtitles or local Whisper transcripts, identifies recurring speakers locally with bundled Sherpa ONNX models, asks Codex to enrich natural transcript topics, and combines full-text and semantic search.
 
 Source videos are referenced in place and are never modified. Transcripts, tags,
 speaker voice patterns, embeddings, and the search index stay under the application's local data folder.
 Only untimed transcript text is sent to OpenAI when Codex creates summaries and
-search metadata; video and audio files are never uploaded by VOD Search.
+search metadata; video and audio files are never uploaded by CutScout.
 
 ## Example screens
 
 ### Library
 
-![VOD Search library showing indexed videos and local search status](docs/images/vod-search-library.jpg)
+![CutScout library showing indexed videos and local search status](docs/images/vod-search-library.jpg)
 
 ### Video workspace
 
-![VOD Search video workspace with synchronized transcript and topic markers](docs/images/vod-search-video-workspace.jpg)
+![CutScout video workspace with synchronized transcript and topic markers](docs/images/vod-search-video-workspace.jpg)
 
 ## What works
 
@@ -50,7 +50,7 @@ extension.
 ## First run
 
 1. Open **Settings** and install Codex, then select **Sign in** to authenticate
-   with ChatGPT or an OpenAI account. If Codex is already installed, VOD Search
+   with ChatGPT or an OpenAI account. If Codex is already installed, CutScout
    detects it.
 2. Open **Library** and use the first-run readiness panel to prepare Whisper
    small.en and the semantic search index. Both are downloaded and managed
@@ -72,7 +72,7 @@ Sherpa ONNX native runtime, and its speaker models. End users do not need Node.j
 Python, pnpm, a separate AI account, or a terminal. The Settings page
 uses OpenAI's official standalone Windows installer for Codex, which downloads
 checksum-verified release assets into Codex's standard per-user storage and
-places the app-managed command under the VOD Search application-data folder.
+places the app-managed command under the CutScout application-data folder.
 
 ## Processing schedule
 
@@ -86,7 +86,7 @@ searchable without waiting for another window.
 
 ## Shared folder metadata
 
-Every source folder can act as a portable metadata cache. VOD Search always
+Every source folder can act as a portable metadata cache. CutScout always
 looks for a matching `.vod-search/<video-fingerprint>.json` bundle before it
 queues transcription or Codex summarization. A bundle contains timed transcript
 segments, topic boundaries, summaries, entities, events, aliases, and search
@@ -167,6 +167,8 @@ signing is strongly recommended before distributing the installer broadly to
 reduce SmartScreen warnings and strengthen publisher verification.
 
 ## Architecture
+
+See [the contributor architecture guide](docs/architecture.md) for process boundaries, feature ownership, and where new code belongs.
 
 - `apps/desktop`: Electron main process, sandboxed preload, React UI, utility
   indexer process, filesystem watcher, and durable job scheduler.

@@ -1,6 +1,6 @@
 import { availableParallelism } from "node:os"
 import { dirname, extname, join, resolve } from "node:path"
-import { access, mkdir } from "node:fs/promises"
+import { access, mkdir, realpath } from "node:fs/promises"
 import { fork } from "node:child_process"
 import { openDatabase, Repository } from "@vod-search/database"
 import {
@@ -10,9 +10,9 @@ import {
   listMediaRequestSchema,
   processingScheduleSchema,
   resourceModeSchema,
-  roughCutGenerateRequestSchema,
   retryJobRequestSchema,
   searchRequestSchema,
+  setClipOutputFolderRequestSchema,
   setFolderSharingRequestSchema,
   speakerAssignProfileRequestSchema,
   speakerCreateProfileRequestSchema,
@@ -23,7 +23,6 @@ import {
   type TranscriptTopic
 } from "@vod-search/contracts"
 import { chunkTranscript, parseSubtitle, SearchService } from "@vod-search/search"
-import { buildRoughCutPlan, type RoughCutSource } from "@vod-search/rough-cut"
 import {
   BGE_EMBEDDING_VERSION,
   BgeEmbedder,
@@ -40,8 +39,7 @@ import {
   probeMedia,
   transcribeWithWhisper
 } from "@vod-search/inference"
-import type { RoughCutCandidateInput } from "@vod-search/inference"
-import { scanSourceFolder } from "./scanner.js"
+import { isPathWithin, scanSourceFolder } from "./scanner.js"
 import { publishSharedMetadata } from "./shared-metadata.js"
 import { watch, type FSWatcher } from "chokidar"
 
@@ -104,7 +102,11 @@ async function dispatch(method: string, payload: unknown): Promise<unknown> {
   switch (method) {
     case "library:add-folder": {
       const input = addFolderRequestSchema.parse(payload)
-      const canonicalPath = resolve(input.path)
+      const canonicalPath = await realpath(input.path).catch(() => resolve(input.path))
+      const clipOutputFolder = repository.getClipOutputFolder()
+      if (clipOutputFolder && isPathWithin(canonicalPath, clipOutputFolder)) {
+        throw new Error("The clip output folder cannot also be added as an indexed source")
+      }
       const folder = repository.addSourceFolder(input.path, canonicalPath, input.publishSharedMetadata)
       ensureFolderWatcher(folder.id, folder.path)
       startFolderScan(folder.id, folder.path)
@@ -146,13 +148,26 @@ async function dispatch(method: string, payload: unknown): Promise<unknown> {
       notifyJobsChanged()
       return undefined
     }
+    case "clips:get-output-folder": return repository.getClipOutputFolder()
+    case "clips:set-output-folder": {
+      const input = setClipOutputFolderRequestSchema.parse(payload)
+      const canonicalPath = await realpath(input.path).catch(() => resolve(input.path))
+      for (const folder of repository.listSourceFolders()) {
+        const sourcePath = await realpath(folder.path).catch(() => resolve(folder.path))
+        if (isPathWithin(sourcePath, canonicalPath)) {
+          throw new Error("Choose a clip folder inside an indexed source, not a folder that contains the entire source")
+        }
+      }
+      const savedPath = repository.setClipOutputFolder(canonicalPath)
+      for (const folder of repository.listSourceFolders()) startFolderScan(folder.id, folder.path, true)
+      return savedPath
+    }
     case "search:query": {
       const input = searchRequestSchema.parse(payload)
       const activeEmbedder = input.mode === "keyword" ? null : await getEmbedder()
       const queryEmbedding = activeEmbedder ? await activeEmbedder.embedQuery(input.query) : undefined
       return search.search(input, queryEmbedding)
     }
-    case "rough-cut:generate": return generateRoughCut(payload)
     case "jobs:list": return repository.listJobs()
     case "jobs:retry": repository.retryJob(retryJobRequestSchema.parse({ jobId: payload }).jobId); notifyJobsChanged(); return undefined
     case "jobs:pause-all": repository.pauseAllJobs(); notifyJobsChanged(); return undefined
@@ -207,102 +222,6 @@ async function dispatch(method: string, payload: unknown): Promise<unknown> {
     }
     default: throw new Error(`Unknown indexer method: ${method}`)
   }
-}
-
-async function generateRoughCut(payload: unknown) {
-  const request = roughCutGenerateRequestSchema.parse(payload)
-  const activeEmbedder = await getEmbedder()
-  if (!activeEmbedder) throw new Error("Install the semantic search model before generating a rough cut")
-  const activeEnricher = await getEnricher()
-  if (!activeEnricher) throw new Error("Sign in to Codex before generating a rough cut")
-
-  const sources: RoughCutSource[] = request.mediaIds.map((mediaId) => {
-    const media = repository.getMedia(mediaId)
-    const path = repository.getMediaPath(mediaId)
-    if (!path || media.availability !== "available") throw new Error(`${media.displayName} is offline or unavailable`)
-    if (!media.durationMs || media.durationMs <= 0) throw new Error(`${media.displayName} does not have a usable duration`)
-    const segments = repository.getTranscript(mediaId).filter((segment) => segment.text.trim())
-    if (segments.length === 0) throw new Error(`${media.displayName} does not have an indexed transcript`)
-    return {
-      mediaId,
-      path,
-      title: media.displayName,
-      durationMs: media.durationMs,
-      segments: segments.map((segment) => ({
-        id: segment.id,
-        startMs: segment.startMs,
-        endMs: segment.endMs,
-        text: segment.text.trim().replace(/\s+/g, " ")
-      }))
-    }
-  })
-
-  const sourceById = new Map(sources.map((source) => [source.mediaId, source]))
-  const candidates: RoughCutCandidateInput[] = []
-  const seenWindows = new Set<string>()
-  for (const query of extractRoughCutQueries(request.prompt)) {
-    const queryEmbedding = await activeEmbedder.embedQuery(query)
-    const response = search.search({
-      query,
-      mode: "hybrid",
-      mediaIds: request.mediaIds,
-      includeMissing: false,
-      limit: 15
-    }, queryEmbedding)
-    for (const hit of response.hits) {
-      if (candidates.length >= 120) break
-      const source = sourceById.get(hit.mediaId)
-      if (!source) continue
-      const windowStart = Math.max(0, hit.startMs - 30_000)
-      const windowEnd = Math.min(source.durationMs, hit.endMs + 30_000)
-      const evidence = source.segments.filter((segment) => segment.endMs >= windowStart && segment.startMs <= windowEnd)
-      if (evidence.length === 0) continue
-      const key = `${hit.mediaId}:${evidence[0]!.id}:${evidence.at(-1)!.id}`
-      if (seenWindows.has(key)) continue
-      seenWindows.add(key)
-      candidates.push({
-        candidateId: `candidate-${candidates.length + 1}`,
-        mediaId: hit.mediaId,
-        title: hit.title,
-        requestedBeat: query,
-        summary: hit.summary,
-        searchScore: hit.score,
-        segments: evidence.map((segment) => ({ segmentId: segment.id, text: segment.text }))
-      })
-    }
-  }
-  if (candidates.length === 0) {
-    throw new Error("No transcript moments in the selected videos matched this brief. Try more concrete spoken phrases or select additional videos.")
-  }
-
-  const selections = await activeEnricher.planRoughCut(request.prompt, candidates)
-  const candidateById = new Map(candidates.map((candidate) => [candidate.candidateId, candidate]))
-  const matches = selections.map((selection) => {
-    const candidate = candidateById.get(selection.candidateId)
-    if (!candidate) throw new Error(`Codex selected an unknown candidate: ${selection.candidateId}`)
-    return {
-      mediaId: candidate.mediaId,
-      startSegmentId: selection.startSegmentId,
-      endSegmentId: selection.endSegmentId,
-      requestedText: selection.requestedText,
-      matchRationale: selection.matchRationale
-    }
-  })
-  if (matches.length === 0) {
-    throw new Error("The selected videos did not contain enough transcript evidence for this rough-cut brief")
-  }
-  return buildRoughCutPlan({ request, sources, matches })
-}
-
-function extractRoughCutQueries(prompt: string): string[] {
-  const normalized = prompt.trim().replace(/\s+/g, " ")
-  const beats = prompt
-    .split(/\r?\n+|(?<=[.!?;])\s+/)
-    .map((value) => value.trim().replace(/^[-*\d.)\s]+/, ""))
-    .filter((value) => value.length >= 4)
-    .map((value) => value.slice(0, 500))
-  const ordered = normalized.length <= 500 ? [normalized, ...beats] : beats
-  return [...new Set(ordered)].slice(0, 8)
 }
 
 function notifyLibraryChanged(): void {
@@ -690,7 +609,7 @@ async function runEnrichmentJob(jobId: string, mediaId: string, activeEnricher: 
   try {
     await publishSharedMetadata(repository, mediaId)
   } catch (error) {
-    console.warn(`Shared VOD Search metadata could not be published for ${mediaId}:`, error)
+    console.warn(`Shared CutScout metadata could not be published for ${mediaId}:`, error)
   }
   repository.updateJob(jobId, { status: "succeeded", progress: 1, error: null })
   repository.requeueJob(mediaId, "embed")
@@ -804,7 +723,8 @@ function startFolderScan(folderId: string, path: string, force = false): void {
   }
   rescanRequested.delete(folderId)
   const scan = scanSourceFolder(repository, folderId, path, {
-    onProgress: createThrottledNotification(notifyLibraryChanged, 500)
+    onProgress: createThrottledNotification(notifyLibraryChanged, 500),
+    excludedPaths: [repository.getClipOutputFolder()].filter((value): value is string => Boolean(value))
   }).catch((error) => {
     console.error(`Failed to scan source folder ${path}:`, error)
   }).finally(() => {
@@ -836,7 +756,7 @@ async function publishSourceFolder(folderId: string): Promise<void> {
       try {
         await publishSharedMetadata(repository, media.id)
       } catch (error) {
-        console.warn(`Shared VOD Search metadata could not be published for ${media.id}:`, error)
+        console.warn(`Shared CutScout metadata could not be published for ${media.id}:`, error)
       }
     }
     if (batch.length < 500) return
@@ -853,6 +773,8 @@ function ensureFolderWatcher(folderId: string, path: string): void {
   })
   const changed = (changedPath: string): void => {
     if (!isRelevantLibraryPath(changedPath)) return
+    const clipOutputFolder = repository.getClipOutputFolder()
+    if (clipOutputFolder && isPathWithin(changedPath, clipOutputFolder)) return
     const previous = rescanTimers.get(folderId)
     if (previous) clearTimeout(previous)
     const timer = setTimeout(() => {

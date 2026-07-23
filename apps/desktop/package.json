@@ -1,8 +1,8 @@
 {
   "name": "@vod-search/desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Private local search for timestamped video transcripts",
-  "author": "VOD Search contributors",
+  "author": "CutScout contributors",
   "private": true,
   "type": "module",
   "main": "./out/main/index.js",
@@ -29,7 +29,6 @@
     "@vod-search/contracts": "workspace:*",
     "@vod-search/database": "workspace:*",
     "@vod-search/inference": "workspace:*",
-    "@vod-search/rough-cut": "workspace:*",
     "@vod-search/search": "workspace:*",
     "better-sqlite3": "12.11.1",
     "chokidar": "5.0.0",
@@ -61,12 +60,12 @@
   },
   "build": {
     "appId": "com.vodsearch.desktop",
-    "productName": "VOD Search",
+    "productName": "CutScout",
     "publish": [
       {
         "provider": "github",
         "owner": "TheJoshJ",
-        "repo": "vod-search",
+        "repo": "CutScout",
         "releaseType": "release"
       }
     ],

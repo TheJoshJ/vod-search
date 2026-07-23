@@ -303,6 +303,18 @@ describe("Repository", () => {
     }
   })
 
+  it("persists the clip output folder", () => {
+    const database = openDatabase(":memory:")
+    try {
+      const repository = new Repository(database.db)
+      expect(repository.getClipOutputFolder()).toBeNull()
+      expect(repository.setClipOutputFolder("C:\\Exports\\CutScout Clips")).toBe("C:\\Exports\\CutScout Clips")
+      expect(repository.getClipOutputFolder()).toBe("C:\\Exports\\CutScout Clips")
+    } finally {
+      database.close()
+    }
+  })
+
   it("preserves failed jobs during routine enqueue and retries them only when requested", () => {
     const database = openDatabase(":memory:")
     try {

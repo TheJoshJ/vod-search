@@ -26,12 +26,16 @@ const api: VodSearchApi = {
     revealFolder: (folderId) => ipcRenderer.invoke(ipcChannels.libraryRevealFolder, { folderId }),
     removeFolder: (folderId) => ipcRenderer.invoke(ipcChannels.libraryRemoveFolder, { folderId })
   },
+  clips: {
+    getOutputFolder: () => ipcRenderer.invoke(ipcChannels.clipsGetOutputFolder),
+    selectOutputFolder: () => ipcRenderer.invoke(ipcChannels.clipsSelectOutputFolder),
+    revealOutputFolder: () => ipcRenderer.invoke(ipcChannels.clipsRevealOutputFolder)
+  },
   search: {
     query: (input: SearchRequest) => ipcRenderer.invoke(ipcChannels.searchQuery, input)
   },
-  roughCut: {
-    generate: (input) => ipcRenderer.invoke(ipcChannels.roughCutGenerate, input),
-    export: (plan) => ipcRenderer.invoke(ipcChannels.roughCutExport, plan)
+  shortForm: {
+    export: (project) => ipcRenderer.invoke(ipcChannels.shortFormExport, project)
   },
   jobs: {
     list: () => ipcRenderer.invoke(ipcChannels.jobsList),

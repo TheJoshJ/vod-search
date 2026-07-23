@@ -1,17 +1,17 @@
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react"
-import type { MediaDetail, MediaSpeaker, SearchHit, SpeakerProfile } from "@vod-search/contracts"
-import { ArrowLeft, CalendarDays, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Download, Eye, FileText, LoaderCircle, Scissors, Search, Sparkles, UserPlus, Users } from "lucide-react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import type { MediaDetail, SearchHit, ShortFormProject } from "@vod-search/contracts"
+import { ArrowLeft, CalendarDays, ChevronLeft, ChevronRight, CircleAlert, FileText, LoaderCircle, Search, Sparkles, Users } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Popover, PopoverContent, PopoverDescription, PopoverHeader, PopoverTitle, PopoverTrigger } from "@/components/ui/popover"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Slider } from "@/components/ui/slider"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { formatDate, formatTimestamp, stageLabel } from "@/lib/format"
 import { cn } from "@/lib/utils"
+import { ClipComposer } from "./clip-composer"
+import { SpeakersPanel, TranscriptSpeakerAssignment } from "./media-speaker-panel"
 import { areDisplayTextsEquivalent } from "./search-presentation"
 import { cleanMediaTitle, splitQueryMatches } from "./search-workflow"
+import { createShortFormProject } from "./short-form-project"
 import { clusterTimelinePoints } from "./timeline-presentation"
 import { findActiveTranscriptSegmentId, getTranscriptFollowScrollTop } from "./transcript-follow"
 
@@ -34,10 +34,12 @@ interface TimelineMarker {
 
 export function MediaWorkspace({
   selection,
-  onClose
+  onClose,
+  onEditShort
 }: {
   selection: MediaWorkspaceSelection
   onClose: () => void
+  onEditShort: (project: ShortFormProject) => void
 }): React.JSX.Element {
   const returnLabel = selection.returnLabel ?? "library"
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -220,6 +222,7 @@ export function MediaWorkspace({
             durationMs={durationMs}
             disabled={!playbackUrl}
             onPreview={previewRange}
+            onEditShort={(startMs, endMs) => onEditShort(createShortFormProject(detail, startMs, endMs))}
           />
         )}
       </header>
@@ -366,56 +369,24 @@ export function MediaWorkspace({
               </div>
               <TabsContent value="transcript" className="min-h-0 overflow-hidden">
                 <div ref={transcriptScrollRef} className="h-full overflow-y-auto">
-              {detail.transcript.length === 0 ? (
-                <div className="grid min-h-48 place-items-center px-5 text-center"><div><FileText className="mx-auto size-4 text-muted-foreground" /><p className="mt-3 text-xs font-semibold">No transcript yet</p><p className="mt-1 text-[10px] leading-4 text-muted-foreground">This video is waiting for subtitles or local transcription.</p></div></div>
-              ) : detail.transcript.map((segment) => {
-                const queryMatch = Boolean(selection.query && searchMatches.some((marker) => rangesOverlap(marker, segment)))
-                const speaker = segment.mediaSpeakerId ? speakersById.get(segment.mediaSpeakerId) : undefined
-                return (
-                <div
-                  key={segment.id}
-                  className={cn(
-                    "group relative border-b border-l-2 border-l-transparent border-r-2 border-r-transparent transition-colors hover:bg-accent/35",
-                    queryMatch && "border-r-chart-3 bg-chart-3/10",
-                    activeSegmentId === segment.id && "border-l-primary bg-accent/65"
-                  )}
-                >
-                  <button
-                    type="button"
-                    ref={(node) => {
-                      if (node) transcriptRowsRef.current.set(segment.id, node)
-                      else transcriptRowsRef.current.delete(segment.id)
-                    }}
-                    data-active={activeSegmentId === segment.id}
-                    aria-current={activeSegmentId === segment.id ? "true" : undefined}
-                    aria-label={`Seek to ${formatTimestamp(segment.startMs)}: ${segment.text}`}
-                    onClick={() => seekTo(segment.startMs)}
-                    className="grid w-full cursor-pointer grid-cols-[3.5rem_minmax(0,1fr)] gap-2 px-3 py-2.5 text-left focus-visible:bg-accent/35 focus-visible:outline-none"
-                  >
-                    <span className={cn("font-mono text-[9px] font-medium tabular-nums text-primary", activeSegmentId === segment.id && "font-semibold")}>{formatTimestamp(segment.startMs)}</span>
-                    <span className="min-w-0">
-                      {speaker && <span aria-hidden="true" className="mb-1 block h-5" />}
-                      <span className={cn("block text-[11px] leading-[1.45] text-foreground/90", activeSegmentId === segment.id && "font-medium text-foreground")}><HighlightedTranscriptText text={segment.text} query={selection.query} /></span>
-                    </span>
-                  </button>
-                  {speaker && (
-                    <div className="absolute left-[4.5rem] right-2 top-1.5 flex min-w-0 items-center">
-                      <TranscriptSpeakerAssignment
-                        speaker={speaker}
-                        profiles={detail.speakerProfiles}
-                        onChanged={refreshDetail}
-                        onError={(reason) => setError(reason instanceof Error ? reason.message : String(reason))}
-                      />
-                    </div>
-                  )}
-                </div>
-                )
-              })}
+                  {detail.transcript.length === 0 ? (
+                    <div className="grid min-h-48 place-items-center px-5 text-center"><div><FileText className="mx-auto size-4 text-muted-foreground" /><p className="mt-3 text-xs font-semibold">No transcript yet</p><p className="mt-1 text-[10px] leading-4 text-muted-foreground">This video is waiting for subtitles or local transcription.</p></div></div>
+                  ) : detail.transcript.map((segment) => {
+                    const queryMatch = Boolean(selection.query && searchMatches.some((marker) => rangesOverlap(marker, segment)))
+                    const speaker = segment.mediaSpeakerId ? speakersById.get(segment.mediaSpeakerId) : undefined
+                    return (
+                      <div key={segment.id} className={cn("group relative border-b border-l-2 border-l-transparent border-r-2 border-r-transparent transition-colors hover:bg-accent/35", queryMatch && "border-r-chart-3 bg-chart-3/10", activeSegmentId === segment.id && "border-l-primary bg-accent/65")}>
+                        <button type="button" ref={(node) => { if (node) transcriptRowsRef.current.set(segment.id, node); else transcriptRowsRef.current.delete(segment.id) }} data-active={activeSegmentId === segment.id} aria-current={activeSegmentId === segment.id ? "true" : undefined} aria-label={`Seek to ${formatTimestamp(segment.startMs)}: ${segment.text}`} onClick={() => seekTo(segment.startMs)} className="grid w-full cursor-pointer grid-cols-[3.5rem_minmax(0,1fr)] gap-2 px-3 py-2.5 text-left focus-visible:bg-accent/35 focus-visible:outline-none">
+                          <span className={cn("font-mono text-[9px] font-medium tabular-nums text-primary", activeSegmentId === segment.id && "font-semibold")}>{formatTimestamp(segment.startMs)}</span>
+                          <span className="min-w-0">{speaker && <span aria-hidden="true" className="mb-1 block h-5" />}<span className={cn("block text-[11px] leading-[1.45] text-foreground/90", activeSegmentId === segment.id && "font-medium text-foreground")}><HighlightedTranscriptText text={segment.text} query={selection.query} /></span></span>
+                        </button>
+                        {speaker && <div className="absolute left-[4.5rem] right-2 top-1.5 flex min-w-0 items-center"><TranscriptSpeakerAssignment speaker={speaker} profiles={detail.speakerProfiles} onChanged={refreshDetail} onError={(reason) => setError(reason instanceof Error ? reason.message : String(reason))} /></div>}
+                      </div>
+                    )
+                  })}
                 </div>
               </TabsContent>
-              <TabsContent value="speakers" className="min-h-0 overflow-y-auto">
-                <SpeakersPanel detail={detail} onChanged={refreshDetail} onError={(reason) => setError(reason instanceof Error ? reason.message : String(reason))} />
-              </TabsContent>
+              <TabsContent value="speakers" className="min-h-0 overflow-y-auto"><SpeakersPanel detail={detail} onChanged={refreshDetail} onError={(reason) => setError(reason instanceof Error ? reason.message : String(reason))} /></TabsContent>
             </Tabs>
           </aside>
         </div>
@@ -424,370 +395,11 @@ export function MediaWorkspace({
   )
 }
 
-function TranscriptSpeakerAssignment({
-  speaker,
-  profiles,
-  onChanged,
-  onError
-}: {
-  speaker: MediaSpeaker
-  profiles: SpeakerProfile[]
-  onChanged: () => Promise<void>
-  onError: (reason: unknown) => void
-}): React.JSX.Element {
-  const [open, setOpen] = useState(false)
-  const [feedback, setFeedback] = useState<string | null>(null)
-  const { busy, run } = useSpeakerAction(onChanged, onError)
-  const profile = profiles.find((candidate) => candidate.id === speaker.profileId)
-  const suggestion = profiles.find((candidate) => candidate.id === speaker.suggestedProfileId)
-
-  async function assign(profileId: string | null): Promise<void> {
-    setFeedback(null)
-    if (!await run(() => window.vodSearch.speakers.assignProfile(speaker.id, profileId))) return
-    const profileName = profiles.find((candidate) => candidate.id === profileId)?.name
-    setFeedback(profileName
-      ? `Labeled ${speaker.turnCount} ${speaker.turnCount === 1 ? "turn" : "turns"} as ${profileName}.`
-      : `Removed the label from ${speaker.turnCount} ${speaker.turnCount === 1 ? "turn" : "turns"}.`)
-  }
-
-  async function create(name: string): Promise<boolean> {
-    setFeedback(null)
-    const created = await run(() => window.vodSearch.speakers.createProfile(speaker.id, name))
-    if (created) setFeedback(`Created ${name} and labeled ${speaker.turnCount} ${speaker.turnCount === 1 ? "turn" : "turns"}.`)
-    return created
-  }
-
-  return (
-    <Popover open={open} onOpenChange={(nextOpen) => {
-      setOpen(nextOpen)
-      if (nextOpen) setFeedback(null)
-    }}>
-      <PopoverTrigger asChild>
-        <Button
-          variant="ghost"
-          size="sm"
-          className={cn(
-            "h-5 max-w-full gap-1 px-1.5 text-[9px] font-semibold text-muted-foreground hover:bg-background/80 hover:text-foreground",
-            !profile && "text-primary"
-          )}
-          aria-label={`${profile ? `Change ${profile.name}` : `Assign ${speaker.displayName}`} for this transcript voice`}
-        >
-          {profile ? <span className="size-1.5 shrink-0 rounded-full bg-primary/70" /> : <UserPlus className="size-3" />}
-          <span className="truncate">{profile?.name ?? `${speaker.displayName} · Assign`}</span>
-          <ChevronDown className="size-3 shrink-0 opacity-65" />
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent side="left" align="center" sideOffset={6} className="w-72 p-3">
-        <PopoverHeader>
-          <PopoverTitle className="text-xs">Assign this detected voice</PopoverTitle>
-          <PopoverDescription className="text-[10px] leading-4">The change applies to {speaker.turnCount === 1 ? "the detected turn" : `all ${speaker.turnCount} turns`} for this voice in the video.</PopoverDescription>
-        </PopoverHeader>
-
-        {suggestion && !profile && speaker.suggestionScore !== null && (
-          <div className="mt-3 flex items-center gap-2 border-y border-primary/20 bg-primary/5 py-2">
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[10px] font-semibold">Suggested: {suggestion.name}</div>
-              <div className="text-[9px] text-muted-foreground">{Math.round(speaker.suggestionScore * 100)}% voice similarity</div>
-            </div>
-            <Button size="sm" className="h-7 px-2 text-[10px]" disabled={busy} onClick={() => void assign(suggestion.id)}>Use</Button>
-          </div>
-        )}
-
-        <div className="mt-3">
-          <label className="text-[9px] font-medium uppercase tracking-wide text-muted-foreground">Existing speaker</label>
-          <SpeakerProfileSelect speaker={speaker} profiles={profiles} busy={busy} onAssign={(profileId) => void assign(profileId)} />
-        </div>
-
-        <div className="mt-3 border-t pt-3">
-          <label className="text-[9px] font-medium uppercase tracking-wide text-muted-foreground">New speaker</label>
-          <NewSpeakerProfileForm speaker={speaker} busy={busy} onCreate={create} />
-        </div>
-        {feedback && <p role="status" aria-live="polite" className="mt-3 flex items-center gap-1.5 border-t pt-2 text-[9px] leading-4 text-primary"><CheckCircle2 className="size-3 shrink-0" />{feedback}</p>}
-      </PopoverContent>
-    </Popover>
-  )
-}
-
-function SpeakerProfileSelect({
-  speaker,
-  profiles,
-  busy,
-  onAssign
-}: {
-  speaker: MediaSpeaker
-  profiles: SpeakerProfile[]
-  busy: boolean
-  onAssign: (profileId: string | null) => void
-}): React.JSX.Element {
-  return (
-    <Select value={speaker.profileId ?? "unassigned"} disabled={busy} onValueChange={(value) => onAssign(value === "unassigned" ? null : value)}>
-      <SelectTrigger className="mt-1 h-8 w-full text-xs" aria-label={`Speaker profile for ${speaker.displayName}`}><SelectValue /></SelectTrigger>
-      <SelectContent>
-        <SelectItem value="unassigned">Not tagged</SelectItem>
-        {profiles.map((candidate) => <SelectItem key={candidate.id} value={candidate.id}>{candidate.name} · {candidate.sampleCount} {candidate.sampleCount === 1 ? "sample" : "samples"}</SelectItem>)}
-      </SelectContent>
-    </Select>
-  )
-}
-
-function NewSpeakerProfileForm({
-  speaker,
-  busy,
-  onCreate
-}: {
-  speaker: MediaSpeaker
-  busy: boolean
-  onCreate: (name: string) => Promise<boolean>
-}): React.JSX.Element {
-  const [name, setName] = useState("")
-
-  async function submit(event: FormEvent): Promise<void> {
-    event.preventDefault()
-    const nextName = name.trim()
-    if (!nextName || busy) return
-    if (await onCreate(nextName)) setName("")
-  }
-
-  return (
-    <form className="mt-1 flex gap-1.5" onSubmit={(event) => void submit(event)}>
-      <Input value={name} disabled={busy} onChange={(event) => setName(event.target.value)} aria-label={`Create a new profile for ${speaker.displayName}`} placeholder="Name this speaker" className="h-8 text-xs" />
-      <Button type="submit" size="sm" disabled={busy || !name.trim()}>{busy ? <LoaderCircle className="animate-spin" /> : <UserPlus />}Create</Button>
-    </form>
-  )
-}
-
-function useSpeakerAction(onChanged: () => Promise<void>, onError: (reason: unknown) => void): {
-  busy: boolean
-  run: (action: () => Promise<unknown>) => Promise<boolean>
-} {
-  const [busy, setBusy] = useState(false)
-
-  async function run(action: () => Promise<unknown>): Promise<boolean> {
-    setBusy(true)
-    try {
-      await action()
-      await onChanged()
-      return true
-    } catch (reason) {
-      onError(reason)
-      return false
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return { busy, run }
-}
-
-function SpeakersPanel({
-  detail,
-  onChanged,
-  onError
-}: {
-  detail: MediaDetail
-  onChanged: () => Promise<void>
-  onError: (reason: unknown) => void
-}): React.JSX.Element {
-  const analysis = detail.speakerAnalysis
-  if (analysis.state === "setup-required") {
-    return <SpeakerEmptyState icon={Users} title="Speaker recognition is unavailable" description="The bundled Sherpa ONNX models are missing from this build. Reinstall VOD Search to restore local speaker analysis." />
-  }
-  if (analysis.state === "queued" || analysis.state === "running") {
-    return <SpeakerEmptyState icon={LoaderCircle} spinning title={analysis.state === "running" ? "Identifying speakers" : "Speaker analysis queued"} description="The transcript stays available while local speaker analysis runs in the background." />
-  }
-  if (analysis.state === "failed") {
-    return <SpeakerEmptyState icon={CircleAlert} title="Speaker analysis stopped" description={analysis.error ?? "Retry the diarization job from Activity."} destructive />
-  }
-  if (detail.speakers.length === 0) {
-    return <SpeakerEmptyState icon={Users} title="No distinct speakers found" description="Local analysis completed, but it did not return a usable voice pattern for this clip." />
-  }
-
-  return (
-    <div>
-      <div className="border-b bg-muted/20 px-3 py-3">
-        <p className="text-[10px] leading-4 text-muted-foreground">Tag a detected voice once, then reuse or accept that pattern in later clips. Every correction updates the local pattern.</p>
-      </div>
-      <div className="divide-y">
-        {detail.speakers.map((speaker, index) => (
-          <SpeakerEditor
-            key={speaker.id}
-            speaker={speaker}
-            index={index}
-            profiles={detail.speakerProfiles}
-            onChanged={onChanged}
-            onError={onError}
-          />
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function SpeakerEditor({
-  speaker,
-  index,
-  profiles,
-  onChanged,
-  onError
-}: {
-  speaker: MediaSpeaker
-  index: number
-  profiles: SpeakerProfile[]
-  onChanged: () => Promise<void>
-  onError: (reason: unknown) => void
-}): React.JSX.Element {
-  const profile = profiles.find((candidate) => candidate.id === speaker.profileId)
-  const suggestion = profiles.find((candidate) => candidate.id === speaker.suggestedProfileId)
-  const [profileName, setProfileName] = useState(profile?.name ?? "")
-  const { busy, run } = useSpeakerAction(onChanged, onError)
-
-  useEffect(() => setProfileName(profile?.name ?? ""), [profile?.name])
-
-  return (
-    <section className="px-3 py-3">
-      <div className="flex items-start gap-2.5">
-        <div className="grid size-7 shrink-0 place-items-center rounded-full bg-primary/10 text-[10px] font-semibold text-primary">{index + 1}</div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <h3 className="truncate text-xs font-semibold">{speaker.displayName}</h3>
-            {profile ? <Badge variant="accent" className="h-4 px-1.5 text-[8px]">Tagged</Badge> : <Badge variant="secondary" className="h-4 px-1.5 text-[8px]">Detected</Badge>}
-          </div>
-          <div className="mt-1 flex gap-2 font-mono text-[9px] text-muted-foreground">
-            <span>{formatTimestamp(speaker.speechMs)} speaking</span>
-            <span>{speaker.turnCount} {speaker.turnCount === 1 ? "turn" : "turns"}</span>
-            <span>first at {formatTimestamp(speaker.firstStartMs)}</span>
-          </div>
-        </div>
-        {busy && <LoaderCircle className="mt-1 size-3.5 animate-spin text-muted-foreground" />}
-      </div>
-
-      {suggestion && speaker.suggestionScore !== null && (
-        <div className="mt-3 flex items-center gap-2 border border-primary/20 bg-primary/5 px-2 py-2">
-          <div className="min-w-0 flex-1"><div className="truncate text-[10px] font-semibold">Looks like {suggestion.name}</div><div className="mt-0.5 text-[9px] text-muted-foreground">{Math.round(speaker.suggestionScore * 100)}% pattern match</div></div>
-          <Button size="sm" className="h-7 px-2 text-[10px]" disabled={busy} onClick={() => void run(() => window.vodSearch.speakers.assignProfile(speaker.id, suggestion.id))}>Use match</Button>
-        </div>
-      )}
-
-      <div className="mt-3">
-        <label className="text-[9px] font-medium uppercase tracking-wide text-muted-foreground">Speaker pattern</label>
-        <SpeakerProfileSelect speaker={speaker} profiles={profiles} busy={busy} onAssign={(profileId) => void run(() => window.vodSearch.speakers.assignProfile(speaker.id, profileId))} />
-      </div>
-
-      {profile ? (
-        <div className="mt-2 flex gap-1.5">
-          <Input value={profileName} disabled={busy} onChange={(event) => setProfileName(event.target.value)} aria-label={`Rename ${profile.name}`} className="h-8 text-xs" />
-          <Button variant="outline" size="sm" disabled={busy || !profileName.trim() || profileName.trim() === profile.name} onClick={() => void run(() => window.vodSearch.speakers.renameProfile(profile.id, profileName.trim()))}>Rename</Button>
-        </div>
-      ) : (
-        <NewSpeakerProfileForm speaker={speaker} busy={busy} onCreate={(name) => run(() => window.vodSearch.speakers.createProfile(speaker.id, name))} />
-      )}
-    </section>
-  )
-}
-
-function SpeakerEmptyState({ icon: Icon, title, description, spinning = false, destructive = false }: { icon: typeof Users; title: string; description: string; spinning?: boolean; destructive?: boolean }): React.JSX.Element {
-  return <div className="grid min-h-56 place-items-center px-6 text-center"><div><Icon className={cn("mx-auto size-5 text-muted-foreground", spinning && "animate-spin", destructive && "text-destructive")} /><p className="mt-3 text-xs font-semibold">{title}</p><p className="mt-1 max-w-64 text-[10px] leading-4 text-muted-foreground">{description}</p></div></div>
-}
-
-function ClipComposer({
-  mediaId,
-  currentMs,
-  durationMs,
-  disabled,
-  onPreview
-}: {
-  mediaId: string
-  currentMs: number
-  durationMs: number
-  disabled: boolean
-  onPreview: (startMs: number, endMs: number) => void
-}): React.JSX.Element {
-  const [open, setOpen] = useState(false)
-  const [range, setRange] = useState<[number, number]>(() => defaultClipRange(currentMs, durationMs))
-  const [exporting, setExporting] = useState(false)
-  const [exportedPath, setExportedPath] = useState<string | null>(null)
-  const [exportError, setExportError] = useState<string | null>(null)
-
-  function chooseDuration(milliseconds: number): void {
-    const startMs = Math.min(currentMs, Math.max(0, durationMs - 1_000))
-    setRange([startMs, Math.min(durationMs, startMs + milliseconds)])
-  }
-
-  async function exportClip(): Promise<void> {
-    setExporting(true)
-    setExportError(null)
-    try {
-      const result = await window.vodSearch.media.exportClip(mediaId, range[0], range[1])
-      if (result.path) setExportedPath(result.path)
-    } catch (reason) {
-      setExportError(reason instanceof Error ? reason.message : String(reason))
-    } finally {
-      setExporting(false)
-    }
-  }
-
-  return (
-    <Popover open={open} onOpenChange={(nextOpen) => {
-      setOpen(nextOpen)
-      if (nextOpen) {
-        setRange(defaultClipRange(currentMs, durationMs))
-        setExportError(null)
-      }
-    }}>
-      <PopoverTrigger asChild>
-        <Button variant="outline" size="sm" disabled={disabled}><Scissors />Clip</Button>
-      </PopoverTrigger>
-      <PopoverContent align="end" className="w-80">
-        <PopoverHeader>
-          <PopoverTitle>Export a clip</PopoverTitle>
-          <PopoverDescription>Choose a precise range, preview it, then save a new MP4.</PopoverDescription>
-        </PopoverHeader>
-        <div className="mt-4 space-y-4">
-          <div className="flex items-center justify-between font-mono text-[10px] tabular-nums">
-            <span>{formatTimestamp(range[0])}</span>
-            <span className="text-muted-foreground">{formatTimestamp(range[1] - range[0])} clip</span>
-            <span>{formatTimestamp(range[1])}</span>
-          </div>
-          <Slider
-            min={0}
-            max={durationMs}
-            step={250}
-            value={range}
-            minStepsBetweenThumbs={4}
-            onValueChange={(value) => setRange([value[0] ?? 0, value[1] ?? durationMs])}
-            aria-label="Clip start and end"
-          />
-          <div className="flex items-center gap-1.5">
-            <span className="mr-auto text-[10px] text-muted-foreground">From playhead</span>
-            <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => chooseDuration(15_000)}>15s</Button>
-            <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => chooseDuration(30_000)}>30s</Button>
-            <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => chooseDuration(60_000)}>60s</Button>
-          </div>
-          {exportedPath && <p className="truncate text-[10px] text-muted-foreground" title={exportedPath}>Saved {exportedPath.split(/[\\/]/).at(-1)}</p>}
-          {exportError && <p className="text-[10px] leading-4 text-destructive">{exportError}</p>}
-          <div className="flex justify-end gap-2 border-t pt-3">
-            <Button variant="outline" size="sm" onClick={() => onPreview(range[0], range[1])}><Eye />Preview</Button>
-            <Button size="sm" disabled={exporting || range[1] - range[0] < 1_000} onClick={() => void exportClip()}>
-              {exporting ? <LoaderCircle className="animate-spin" /> : <Download />}
-              {exporting ? "Exporting" : "Export MP4"}
-            </Button>
-          </div>
-        </div>
-      </PopoverContent>
-    </Popover>
-  )
-}
-
 function HighlightedTranscriptText({ text, query }: { text: string; query?: string | undefined }): React.JSX.Element {
   if (!query) return <>{text}</>
   return <>{splitQueryMatches(text, query).map((part, index) => part.match
     ? <mark key={`${part.text}:${index}`} className="rounded-sm bg-chart-3/25 px-0.5 text-inherit">{part.text}</mark>
     : <span key={`${part.text}:${index}`}>{part.text}</span>)}</>
-}
-
-function defaultClipRange(currentMs: number, durationMs: number): [number, number] {
-  const startMs = Math.min(Math.max(0, currentMs - 5_000), Math.max(0, durationMs - 1_000))
-  return [startMs, Math.min(durationMs, startMs + 30_000)]
 }
 
 function findClosestMarkerIndex(markers: TimelineMarker[], currentMs: number): number {
@@ -831,23 +443,4 @@ function buildMarkers(detail: MediaDetail | null, searchHits: SearchHit[]): Time
 
 function rangesOverlap(left: { startMs: number; endMs: number }, right: { startMs: number; endMs: number }): boolean {
   return left.startMs <= right.endMs && right.startMs <= left.endMs
-}
-
-function formatTimestamp(milliseconds: number): string {
-  const seconds = Math.max(0, Math.floor(milliseconds / 1000))
-  const hours = Math.floor(seconds / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
-  const remainder = seconds % 60
-  return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}` : `${minutes}:${String(remainder).padStart(2, "0")}`
-}
-
-function formatDate(milliseconds: number): string {
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(milliseconds)
-}
-
-function stageLabel(stage: MediaDetail["media"]["highestCompletedStage"]): string {
-  if (stage === "ready") return "Ready"
-  if (stage === "embedded" || stage === "enriched") return "Searchable"
-  if (stage === "chunked") return "Indexed"
-  return stage.replaceAll("_", " ").replace(/^./, (character) => character.toUpperCase())
 }

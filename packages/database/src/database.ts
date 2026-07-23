@@ -1,5 +1,6 @@
 import Database from "better-sqlite3"
 import * as sqliteVec from "sqlite-vec"
+import { existsSync } from "node:fs"
 import { migrate } from "./migrations.js"
 
 export interface VodDatabase {
@@ -18,7 +19,7 @@ export function openDatabase(path: string): VodDatabase {
 
   let vectorSearchAvailable = false
   try {
-    sqliteVec.load(db)
+    db.loadExtension(resolveSqliteVecExtensionPath(sqliteVec.getLoadablePath()))
     db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS search_chunk_vectors USING vec0(
         chunk_id INTEGER PRIMARY KEY,
@@ -36,5 +37,13 @@ export function openDatabase(path: string): VodDatabase {
     vectorSearchAvailable,
     close: () => db.close()
   }
+}
+
+export function resolveSqliteVecExtensionPath(
+  loadablePath: string,
+  pathExists: (path: string) => boolean = existsSync
+): string {
+  const unpackedPath = loadablePath.replace(/\.asar([\\/])/, ".asar.unpacked$1")
+  return unpackedPath !== loadablePath && pathExists(unpackedPath) ? unpackedPath : loadablePath
 }
 

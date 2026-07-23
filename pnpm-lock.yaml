@@ -72,9 +72,6 @@ importers:
       '@vod-search/inference':
         specifier: workspace:*
         version: link:../../packages/inference
-      '@vod-search/rough-cut':
-        specifier: workspace:*
-        version: link:../../packages/rough-cut
       '@vod-search/search':
         specifier: workspace:*
         version: link:../../packages/search
@@ -194,12 +191,6 @@ importers:
       zod:
         specifier: 4.4.3
         version: 4.4.3
-
-  packages/rough-cut:
-    dependencies:
-      '@vod-search/contracts':
-        specifier: workspace:*
-        version: link:../contracts
 
   packages/search:
     dependencies:

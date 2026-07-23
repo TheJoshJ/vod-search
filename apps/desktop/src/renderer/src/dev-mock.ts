@@ -112,57 +112,16 @@ export function createDevMockApi(): VodSearchApi {
       revealFolder: async () => undefined,
       removeFolder: async () => undefined
     },
+    clips: {
+      getOutputFolder: async () => "D:\\CutScout Clips",
+      selectOutputFolder: async () => "D:\\CutScout Clips",
+      revealOutputFolder: async () => undefined
+    },
     search: {
       query: async () => ({ hits, elapsedMs: 38, indexedChunkCount: stats.searchableChunks })
     },
-    roughCut: {
-      generate: async (input) => {
-        const before = input.handleBeforeMs ?? 15_000
-        const after = input.handleAfterMs ?? 15_000
-        let cursor = 0
-        const items = input.mediaIds.slice(0, 3).map((mediaId, order) => {
-          const item = media.find((candidate) => candidate.id === mediaId) ?? media[order]!
-          const contentStartMs = 90_000 + order * 180_000
-          const contentEndMs = contentStartMs + 12_000
-          const sourceInMs = Math.max(0, contentStartMs - before)
-          const sourceOutMs = Math.min(item.durationMs ?? contentEndMs + after, contentEndMs + after)
-          const sequenceStartMs = cursor
-          cursor += sourceOutMs - sourceInMs
-          return {
-            id: crypto.randomUUID(),
-            order,
-            mediaId: item.id,
-            sourcePath: `${sourceFolder.path}\\${item.relativePath}`,
-            sourceTitle: item.displayName,
-            sourceDurationMs: item.durationMs ?? 1,
-            contentStartMs,
-            contentEndMs,
-            sourceInMs,
-            sourceOutMs,
-            sequenceStartMs,
-            sequenceEndMs: cursor,
-            handleBeforeMs: contentStartMs - sourceInMs,
-            handleAfterMs: sourceOutMs - contentEndMs,
-            requestedText: order === 0 ? "Set up the failed attempt" : order === 1 ? "Explain the strategy change" : "Finish on the successful retry",
-            matchRationale: "The retrieved transcript directly discusses this requested beat.",
-            transcriptExcerpt: "This sample transcript moment provides grounded evidence for the requested part of the rough cut."
-          }
-        })
-        return {
-          version: 1 as const,
-          id: crypto.randomUUID(),
-          title: input.title ?? "Text-directed rough cut",
-          brief: input.prompt,
-          createdAtMs: Date.now(),
-          frameRate: input.frameRate ?? "30" as const,
-          selectedMediaIds: input.mediaIds,
-          handleBeforeMs: before,
-          handleAfterMs: after,
-          totalDurationMs: cursor,
-          items
-        }
-      },
-      export: async () => ({ xmlPath: "D:\\Exports\\rough-cut.xml", jsonPath: "D:\\Exports\\rough-cut.roughcut.json" })
+    shortForm: {
+      export: async () => ({ path: "D:\\Exports\\vertical-short.mp4" })
     },
     jobs: {
       list: async () => jobs,

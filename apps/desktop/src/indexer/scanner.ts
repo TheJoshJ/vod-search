@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { open, readFile, readdir, realpath, stat } from "node:fs/promises"
-import { basename, dirname, extname, relative, resolve } from "node:path"
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path"
 import type { Repository } from "@vod-search/database"
 import { chunkTranscript, parseSubtitle } from "@vod-search/search"
 import { importSharedMetadata } from "./shared-metadata.js"
@@ -12,6 +12,7 @@ const fingerprintBytes = 1024 * 1024
 export interface ScanCallbacks {
   onProgress?: (discovered: number) => void
   onMediaIndexed?: () => void
+  excludedPaths?: string[]
 }
 
 export async function scanSourceFolder(
@@ -21,10 +22,12 @@ export async function scanSourceFolder(
   callbacks: ScanCallbacks = {}
 ): Promise<void> {
   const canonicalRoot = await realpath(sourcePath)
+  const excludedRoots = await Promise.all((callbacks.excludedPaths ?? []).map(async (path) =>
+    realpath(path).catch(() => resolve(path))))
   const mediaPaths: string[] = []
   const subtitleByStem = new Map<string, string>()
 
-  for await (const path of walk(canonicalRoot)) {
+  for await (const path of walk(canonicalRoot, excludedRoots)) {
     const extension = extname(path).toLowerCase()
     if (mediaExtensions.has(extension)) mediaPaths.push(path)
     else if (subtitleExtensions.includes(extension as typeof subtitleExtensions[number])) {
@@ -67,7 +70,7 @@ export async function scanSourceFolder(
       try {
         await importSharedMetadata(repository, media.id, canonicalRoot)
       } catch (error) {
-        console.warn(`Shared VOD Search metadata could not be imported for ${canonicalPath}:`, error)
+        console.warn(`Shared CutScout metadata could not be imported for ${canonicalPath}:`, error)
       }
       callbacks.onProgress?.(index + 1)
       callbacks.onMediaIndexed?.()
@@ -114,10 +117,11 @@ async function quickFingerprint(path: string, size: number): Promise<string> {
   }
 }
 
-async function* walk(root: string): AsyncGenerator<string> {
+async function* walk(root: string, excludedRoots: string[]): AsyncGenerator<string> {
   const directories = [resolve(root)]
   while (directories.length > 0) {
     const directory = directories.pop()!
+    if (excludedRoots.some((excludedRoot) => isPathWithin(directory, excludedRoot))) continue
     let entries
     try {
       entries = await readdir(directory, { withFileTypes: true })
@@ -130,4 +134,10 @@ async function* walk(root: string): AsyncGenerator<string> {
       else if (entry.isFile()) yield path
     }
   }
+}
+
+export function isPathWithin(path: string, parent: string): boolean {
+  const pathFromParent = relative(resolve(parent), resolve(path))
+  return pathFromParent === "" ||
+    (!isAbsolute(pathFromParent) && pathFromParent !== ".." && !pathFromParent.startsWith(`..${sep}`))
 }

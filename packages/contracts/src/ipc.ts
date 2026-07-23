@@ -13,12 +13,8 @@ import {
   sourceFolderSchema
 } from "./domain.js"
 import { searchRequestSchema, searchResponseSchema } from "./search.js"
-import {
-  roughCutExportResponseSchema,
-  roughCutGenerateRequestSchema,
-  roughCutPlanSchema
-} from "./rough-cut.js"
 import { processingScheduleSchema } from "./schedule.js"
+import { shortFormExportResponseSchema, shortFormProjectSchema } from "./short-form.js"
 
 export const ipcChannels = {
   librarySelectFolder: "library:select-folder",
@@ -30,9 +26,11 @@ export const ipcChannels = {
   libraryRescanFolder: "library:rescan-folder",
   libraryRevealFolder: "library:reveal-folder",
   libraryRemoveFolder: "library:remove-folder",
+  clipsGetOutputFolder: "clips:get-output-folder",
+  clipsSelectOutputFolder: "clips:select-output-folder",
+  clipsRevealOutputFolder: "clips:reveal-output-folder",
   searchQuery: "search:query",
-  roughCutGenerate: "rough-cut:generate",
-  roughCutExport: "rough-cut:export",
+  shortFormExport: "short-form:export",
   jobsList: "jobs:list",
   jobsRetry: "jobs:retry",
   jobsPauseAll: "jobs:pause-all",
@@ -72,6 +70,8 @@ export const setFolderSharingRequestSchema = z.object({
   publishSharedMetadata: z.boolean()
 })
 export const sourceFolderRequestSchema = z.object({ folderId: z.string().min(1) })
+export const clipOutputFolderSchema = z.string().min(1).nullable()
+export const setClipOutputFolderRequestSchema = z.object({ path: z.string().min(1) })
 export const listMediaRequestSchema = z.object({
   sourceFolderId: z.string().optional(),
   offset: z.number().int().nonnegative().default(0),
@@ -125,12 +125,16 @@ export interface VodSearchApi {
     revealFolder(folderId: string): Promise<void>
     removeFolder(folderId: string): Promise<void>
   }
+  clips: {
+    getOutputFolder(): Promise<z.infer<typeof clipOutputFolderSchema>>
+    selectOutputFolder(): Promise<z.infer<typeof clipOutputFolderSchema>>
+    revealOutputFolder(): Promise<void>
+  }
   search: {
     query(input: z.input<typeof searchRequestSchema>): Promise<z.infer<typeof searchResponseSchema>>
   }
-  roughCut: {
-    generate(input: z.input<typeof roughCutGenerateRequestSchema>): Promise<z.infer<typeof roughCutPlanSchema>>
-    export(plan: z.input<typeof roughCutPlanSchema>): Promise<z.infer<typeof roughCutExportResponseSchema>>
+  shortForm: {
+    export(project: z.input<typeof shortFormProjectSchema>): Promise<z.infer<typeof shortFormExportResponseSchema>>
   }
   jobs: {
     list(): Promise<Array<z.infer<typeof jobSchema>>>

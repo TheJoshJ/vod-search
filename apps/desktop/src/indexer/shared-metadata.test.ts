@@ -6,7 +6,7 @@ import { openDatabase, Repository } from "@vod-search/database"
 import { sharedTranscriptBundleSchema } from "@vod-search/contracts"
 import { importSharedMetadata, publishSharedMetadata, sharedBundlePath } from "./shared-metadata.js"
 
-describe("shared VOD Search metadata", () => {
+describe("shared CutScout metadata", () => {
   it("publishes a portable bundle and imports it into a fresh local index", async () => {
     const root = await mkdtemp(join(tmpdir(), "vod-search-shared-"))
     const fingerprint = "a".repeat(64)

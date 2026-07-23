@@ -1,9 +1,17 @@
 const { app } = require("electron")
+const { existsSync } = require("node:fs")
 const { createRequire } = require("node:module")
 const { join } = require("node:path")
 
 const databaseRequire = createRequire(join(__dirname, "..", "packages", "database", "package.json"))
 const Database = databaseRequire("better-sqlite3")
+
+function appDataRoot() {
+  const localAppData = process.env.LOCALAPPDATA || ""
+  const current = join(localAppData, "CutScout")
+  const legacy = join(localAppData, ["VOD", "Search"].join(" "))
+  return existsSync(current) || !existsSync(legacy) ? current : legacy
+}
 
 const cases = [
   { query: "Hungry Like the Wolf", expectedTitle: "Risking It All", expectedStartMs: 3 * 60_000 + 26_000 },
@@ -97,9 +105,9 @@ function search(database, query, limit = 5) {
 }
 
 async function main() {
+  const dataRoot = appDataRoot()
   const databasePath = process.env.VOD_SEARCH_DB || join(
-    process.env.LOCALAPPDATA || "",
-    "VOD Search",
+    dataRoot,
     "index",
     "vod-search.db"
   )

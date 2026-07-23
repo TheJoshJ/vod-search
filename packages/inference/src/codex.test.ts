@@ -46,32 +46,10 @@ describe("CodexEnricher", () => {
       confidence: 0.98
     }])
 
-    await expect(enricher.planRoughCut("Open with the death, then explain the strategy.", [{
-      candidateId: "candidate-1",
-      mediaId: "video-1",
-      title: "Boss attempt",
-      requestedBeat: "the death and recovery",
-      summary: "The player dies and changes strategy.",
-      searchScore: 91,
-      segments: [
-        { segmentId: 42, text: "I missed resonance and died to the Kalphite King." },
-        { segmentId: 43, text: "Then we discussed how to change the strategy." }
-      ]
-    }])).resolves.toEqual([{
-      candidateId: "candidate-1",
-      startSegmentId: 42,
-      endSegmentId: 43,
-      requestedText: "Death followed by a strategy change",
-      matchRationale: "The transcript directly covers the failed defensive ability and the response."
-    }])
-
     const skill = await readFile(join(workspacePath, ".agents", "skills", "vod-transcript-enrichment", "SKILL.md"), "utf8")
     expect(skill).toContain("complete transcript in reading order")
     expect(skill).toContain("Do not split at a fixed time")
     expect(skill).toContain("Never claim to see the video")
-    const roughCutSkill = await readFile(join(workspacePath, ".agents", "skills", "vod-rough-cut-planning", "SKILL.md"), "utf8")
-    expect(roughCutSkill).toContain("Never invent an ID")
-    expect(roughCutSkill).toContain("viewing order")
   })
 })
 
@@ -93,22 +71,6 @@ let input = ""
 for await (const chunk of process.stdin) input += chunk
 if (args.at(-1) !== "-") throw new Error("Expected Codex to read its complete prompt from stdin")
 const outputPath = args[args.indexOf("--output-last-message") + 1]
-const roughCutMatch = input.match(/<retrieved_candidate_moments_json>\\s*([\\s\\S]*?)\\s*<\\/retrieved_candidate_moments_json>/)
-if (roughCutMatch) {
-  if (!args.includes('model_reasoning_effort="medium"')) throw new Error("Expected medium rough-cut reasoning effort")
-  const roughCutRequest = JSON.parse(roughCutMatch[1])
-  const candidate = roughCutRequest.candidates[0]
-  const cuts = [{
-    candidateId: candidate.candidateId,
-    startSegmentId: candidate.segments[0].segmentId,
-    endSegmentId: candidate.segments.at(-1).segmentId,
-    requestedText: "Death followed by a strategy change",
-    matchRationale: "The transcript directly covers the failed defensive ability and the response."
-  }]
-  writeFileSync(outputPath, JSON.stringify({ cuts }))
-  process.stdout.write(JSON.stringify({ cuts }))
-  process.exit(0)
-}
 if (!args.includes('model_reasoning_effort="low"')) throw new Error("Expected low enrichment reasoning effort")
 const match = input.match(/<untimed_transcript_segments_json>\\s*([\\s\\S]*?)\\s*<\\/untimed_transcript_segments_json>/)
 if (!match) throw new Error("Untimed transcript JSON was missing from the Codex prompt")

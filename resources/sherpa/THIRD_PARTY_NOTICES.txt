@@ -1,4 +1,4 @@
-VOD Search bundled speaker-recognition notices
+CutScout bundled speaker-recognition notices
 ==============================================
 
 sherpa-onnx

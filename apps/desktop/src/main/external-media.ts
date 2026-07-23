@@ -66,7 +66,7 @@ export async function openMediaAtTimestamp(input: {
     "ffmpeg.exe"
   )
   await access(ffmpegPath)
-  const clipDirectory = join(input.temporaryPath, "VOD Search", "clips")
+  const clipDirectory = join(input.temporaryPath, "CutScout", "clips")
   await mkdir(clipDirectory, { recursive: true })
   const sourceStats = await stat(input.sourcePath)
   const cacheKey = createHash("sha256")
