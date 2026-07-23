@@ -1,21 +1,22 @@
 # CutScout
 
-CutScout is a Windows-first video transcript search application. It indexes existing subtitles or local Whisper transcripts, identifies recurring speakers locally with bundled Sherpa ONNX models, asks Codex to enrich natural transcript topics, and combines full-text and semantic search.
+CutScout is a private, Windows-first workspace for finding, reviewing, and
+repurposing moments from long-form video. It indexes existing subtitles or
+local Whisper transcripts, identifies recurring speakers with bundled Sherpa
+ONNX models, asks Codex to enrich natural transcript topics, and combines
+full-text and semantic search.
 
 Source videos are referenced in place and are never modified. Transcripts, tags,
 speaker voice patterns, embeddings, and the search index stay under the application's local data folder.
 Only untimed transcript text is sent to OpenAI when Codex creates summaries and
 search metadata; video and audio files are never uploaded by CutScout.
 
-## Example screens
+## Download
 
-### Library
-
-![CutScout library showing indexed videos and local search status](docs/images/vod-search-library.jpg)
-
-### Video workspace
-
-![CutScout video workspace with synchronized transcript and topic markers](docs/images/vod-search-video-workspace.jpg)
+[Download the latest Windows installer](https://github.com/TheJoshJ/CutScout/releases/latest).
+Each release also includes the blockmap and `latest.yml` manifest used by
+CutScout's background updater. Current installers are not code-signed, so
+Windows SmartScreen may ask for confirmation.
 
 ## What works
 
@@ -36,8 +37,15 @@ search metadata; video and audio files are never uploaded by CutScout.
   are pinned to `gpt-5.4-mini` with low reasoning effort for cost efficiency.
 - Opens matching videos in a full-width player with timestamp markers plus
   transcript and summary tabs.
+- Exports a selected source range as an MP4 clip or carries it into the
+  **Short form** editor.
+- Builds 9:16 Short form videos from independently selected content and face
+  regions, with final trim controls, caption presets, word highlighting, and
+  local FFmpeg export.
 - Persists background jobs, resumes interrupted work, pauses on battery, and
   keeps moved-file identity through content fingerprints.
+- Keeps indexing and processing available from the Windows notification area
+  when the main window is closed.
 - Supports separate local-time processing windows for ingestion, Whisper
   transcription, and Codex summarization, including overnight ranges.
 - Checks public GitHub Releases for newer packaged versions, downloads updates
@@ -68,9 +76,11 @@ does not require an account. Basic full-text search only requires Whisper (or ex
 similarity, while Codex supplies richer summaries and event metadata.
 
 The packaged Windows application includes Electron, FFmpeg, `whisper.cpp`, the
-Sherpa ONNX native runtime, and its speaker models. End users do not need Node.js,
-Python, pnpm, a separate AI account, or a terminal. The Settings page
-uses OpenAI's official standalone Windows installer for Codex, which downloads
+Sherpa ONNX native runtime, and its speaker models. End users do not need
+Node.js, Python, pnpm, or a terminal. Local transcription, speaker recognition,
+full-text search, and semantic search do not require an account. Codex
+enrichment requires a ChatGPT or OpenAI sign-in. The Settings page uses
+OpenAI's official standalone Windows installer for Codex, which downloads
 checksum-verified release assets into Codex's standard per-user storage and
 places the app-managed command under the CutScout application-data folder.
 
@@ -146,18 +156,19 @@ release.
 
 Installed copies check for updates about 15 seconds after launch and every four
 hours while running. Updates come from the public
-`TheJoshJ/vod-search` GitHub Releases feed, download in the background, and are
+`TheJoshJ/CutScout` GitHub Releases feed, download in the background, and are
 installed after the user chooses **Restart now** or next closes the app.
 
 To publish an update:
 
-1. Change `version` in `apps/desktop/package.json`, for example to `0.1.1`.
-2. Commit and push that version change to `main`.
-3. Create and push a matching tag:
+1. Set the same version in `package.json` and `apps/desktop/package.json`.
+2. Run `pnpm typecheck`, `pnpm test`, and `pnpm build`.
+3. Commit and push the release change to `main`.
+4. Create and push a matching annotated tag:
 
    ```bash
-   git tag v0.1.1
-   git push origin v0.1.1
+   git tag -a vX.Y.Z -m "CutScout vX.Y.Z"
+   git push origin vX.Y.Z
    ```
 
 The tag workflow requires the tag and desktop package version to match. It
@@ -171,7 +182,8 @@ reduce SmartScreen warnings and strengthen publisher verification.
 See [the contributor architecture guide](docs/architecture.md) for process boundaries, feature ownership, and where new code belongs.
 
 - `apps/desktop`: Electron main process, sandboxed preload, React UI, utility
-  indexer process, filesystem watcher, and durable job scheduler.
+  indexer process, filesystem watcher, durable job scheduler, tray lifecycle,
+  and local clip/Short form export.
 - `packages/database`: SQLite schema, FTS5/`sqlite-vec`, and repositories.
 - `packages/search`: subtitle parsing, chunking, lexical/semantic rank fusion.
 - `packages/inference`: verified models, FFmpeg/Whisper adapters, local BGE,
